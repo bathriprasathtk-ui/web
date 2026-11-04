@@ -3,6 +3,41 @@
   "items": [
     {
       "date": "2026-11-04",
+      "repo": "tailscale/tailscale",
+      "summary": "Tested the plain-HTTP serve Host fix against odd Host headers, and found its comment's claim about Go's TLS doesn't hold.",
+      "url": "https://github.com/tailscale/tailscale/pull/22141#pullrequestreview-5766921295",
+      "minutes": 30
+    },
+    {
+      "date": "2026-11-04",
+      "repo": "n8n-io/n8n-docs",
+      "summary": "Checked the new storage lifecycle advice against n8n's code, and found a rule that would expire chat attachments still in use.",
+      "url": "https://github.com/n8n-io/n8n-docs/pull/5542#pullrequestreview-5766916380",
+      "minutes": 25
+    },
+    {
+      "date": "2026-11-04",
+      "repo": "prometheus/prometheus",
+      "summary": "Checked every meta label in the service discovery docs fix against the labels the code actually sets.",
+      "url": "https://github.com/prometheus/prometheus/pull/20272#pullrequestreview-5766910940",
+      "minutes": 15
+    },
+    {
+      "date": "2026-11-04",
+      "repo": "tailscale/tailscale",
+      "summary": "Traced why TS_EXTRA_ARGS stops applying after the first boot with TS_AUTH_ONCE, and gave three workarounds.",
+      "url": "https://github.com/tailscale/tailscale/issues/20728#issuecomment-6628387424",
+      "minutes": 22
+    },
+    {
+      "date": "2026-11-04",
+      "repo": "cockpit-project/cockpit",
+      "summary": "Sent the fix for the broken Ubuntu logos in the ws container, after the reporter confirmed it on Ubuntu 26.04.",
+      "url": "https://github.com/cockpit-project/cockpit/pull/23900",
+      "minutes": 18
+    },
+    {
+      "date": "2026-11-04",
       "repo": "prometheus/prometheus",
       "summary": "Built the CORS default-origin fix and its base, and checked every origin setting against the API with curl.",
       "url": "https://github.com/prometheus/prometheus/pull/20252#pullrequestreview-5764459292",
