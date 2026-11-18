@@ -5,14 +5,14 @@
   "license": "MPL-2.0",
   "scripts": {
     "dev": "astro dev",
-    "build": "astro build && node ../../scripts/csp.mjs dist headers.base --wasm --style-attrs --badges",
+    "build": "astro build && node ../../scripts/bare-links.mjs dist https://docs.conn3x.org && node ../../scripts/csp.mjs dist headers.base --wasm --style-attrs --badges",
     "preview": "wrangler dev --port 8788"
   },
   "dependencies": {
-    "@astrojs/starlight": "0.42.7",
-    "astro": "7.4.4"
+    "@astrojs/starlight": "0.42.10",
+    "astro": "7.4.11"
   },
   "devDependencies": {
-    "wrangler": "4.156.0"
+    "wrangler": "4.160.1"
   }
 }

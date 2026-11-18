@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
@@ -55,8 +55,48 @@ jobs:
       - name: Browser tests
         working-directory: apps/site
         run: |
-          pnpm exec playwright install --with-deps chromium
+          # --with-deps installs Chromium's libraries with apt. When the
+          # runner can't reach Ubuntu's mirrors, the image's own libraries
+          # are enough, and a missing one still fails the tests below.
+          pnpm exec playwright install --with-deps chromium || pnpm exec playwright install chromium
           pnpm exec playwright test
+
+  # Every page has to show its largest content in under 2 seconds on
+  # Lighthouse's mobile run (James, 16 Nov 2026). scripts/speed.mjs lists the
+  # pages and fails over budget.
+  speed:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Check each site as Cloudflare would serve it
+        run: |
+          # One wrangler dev at a time: two can't share their local socket.
+          check() {
+            (cd "apps/$1" && pnpm exec wrangler dev --port 8787 --ip 127.0.0.1 > "/tmp/$1.log" 2>&1 & echo $! > "/tmp/$1.pid")
+            if ! timeout 180 bash -c "until curl -s -o /dev/null http://127.0.0.1:8787/; do sleep 1; done"; then
+              echo "::error::wrangler dev for $1 never answered"
+              tail -n 40 "/tmp/$1.log"
+              return 1
+            fi
+            node scripts/speed.mjs "$1" http://127.0.0.1:8787
+            local rc=$?
+            pkill -f "wrangler dev --port 8787" || true
+            sleep 2
+            return $rc
+          }
+          rc=0
+          check site || rc=1
+          check docs || rc=1
+          exit $rc
 
   # Every config the Circuit Builder can write for the CI builds, made by the
   # same code as the page, has to pass conn3x validate, which also checks the
@@ -88,12 +128,19 @@ jobs:
       - run: node scripts/builder-combos.mjs "$RUNNER_TEMP/builds"
       - name: Validate every build
         working-directory: ${{ runner.temp }}/builds
+        # Every build needs the same few providers. One cache means each is
+        # fetched once, not once a build, so a release host having a bad
+        # minute fails one download instead of dozens; a failed init gets
+        # one more try for the same reason.
+        env:
+          TF_PLUGIN_CACHE_DIR: ${{ runner.temp }}/plugin-cache
         run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
           conn3x fmt -check -recursive .
           failed=""
           for d in */; do
             echo "::group::${d%/}"
-            (cd "$d" && conn3x init -backend=false -no-color > /dev/null && conn3x validate -no-color) || failed="$failed ${d%/}"
+            (cd "$d" && { conn3x init -backend=false -no-color > /dev/null || { sleep 20; conn3x init -backend=false -no-color > /dev/null; }; } && conn3x validate -no-color) || failed="$failed ${d%/}"
             echo "::endgroup::"
           done
           if [ -n "$failed" ]; then
@@ -107,7 +154,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc

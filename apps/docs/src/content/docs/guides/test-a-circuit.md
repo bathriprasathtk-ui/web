@@ -1,0 +1,530 @@
+---
+title: Test a circuit
+description: "Write conn3x test files for a circuit: assert on what it plans without a server, fake host facts with a mock provider, and apply it for real on a container."
+---
+
+You changed a step, and you'd like to know what it does to every host before anyone runs it on a server. `conn3x test` answers that. It's OpenTofu's [test command](https://opentofu.org/docs/cli/commands/test/), and it works on circuits as it does on any other configuration: each `run` block plans or applies the circuit, then checks `assert` conditions against the result.
+
+Most of a circuit can be tested without a server at all. A plan already says which package goes on which host and what every file will contain, so asserting on the plan catches a wrong template, a `for_each` that drops a host or a variable that doesn't reach a step. When you need to know the host really ends up that way, a run can apply to a container.
+
+This guide uses Conn3x v0.20.0.
+
+## Where tests go
+
+Test files end in `.tftest.hcl` and sit next to the circuit or in a `tests` directory under it. `conn3x test` finds both. Each file starts from empty state, runs its `run` blocks in order and destroys whatever it applied at the end.
+
+Assertions refer to steps by their [resource addresses](/reference/circuits/addresses). Step `motd` in circuit `web` is `conn3x_file.web__motd`, and `["a"]` picks host `a`. Run `conn3x plan` once if you're not sure what a step is called; the plan prints every address.
+
+## Test what the circuit plans
+
+Here's a small circuit, `main.circuit.hcl`, with two hosts and a variable:
+
+```hcl
+variable "greeting" {
+  type    = string
+  default = "Hello"
+}
+
+circuit "web" {
+  hosts = { a = "192.0.2.10", b = "192.0.2.11" }
+
+  ssh {
+    user = "root"
+  }
+
+  step "nginx" {
+    package {
+      name = "nginx"
+    }
+  }
+
+  step "motd" {
+    file {
+      path    = "/etc/motd"
+      content = "${var.greeting} from ${each.key}\n"
+    }
+  }
+}
+```
+
+And a test for it, `tests/web.tftest.hcl`:
+
+```hcl
+mock_provider "conn3x" {}
+
+run "motd_names_each_host" {
+  command = plan
+
+  assert {
+    condition     = conn3x_file.web__motd["a"].content == "Hello from a\n"
+    error_message = "motd on host a is wrong"
+  }
+
+  assert {
+    condition     = length(conn3x_package.web__nginx) == 2
+    error_message = "nginx should be planned on both hosts"
+  }
+}
+
+run "greeting_variable" {
+  command = plan
+
+  variables {
+    greeting = "Hi"
+  }
+
+  assert {
+    condition     = conn3x_file.web__motd["b"].content == "Hi from b\n"
+    error_message = "greeting variable not applied"
+  }
+}
+```
+
+`command = plan` stops each run at the plan. The second run sets `greeting` for itself, so one file can try the same circuit with different inputs. Initialize the directory once, then run the tests:
+
+```sh
+conn3x init
+conn3x test
+```
+
+```text
+tests/web.tftest.hcl... pass
+  run "motd_names_each_host"... pass
+  run "greeting_variable"... pass
+
+Success! 2 passed, 0 failed.
+```
+
+The hosts are documentation addresses that nothing answers on. That's fine for a plan: planning a step that isn't in state yet doesn't log in to the host, so this file would pass even without its first line. `mock_provider "conn3x" {}` makes sure nothing logs in: it swaps the real provider for a fake one, so no run in the file opens an SSH connection, whatever it plans or applies.
+
+## When an assertion fails
+
+Change the first condition to expect `"Hello from b\n"` and run the tests again. The failure shows the value the plan had and the difference:
+
+```text
+tests/web.tftest.hcl... fail
+  run "motd_names_each_host"... fail
+
+Error: Test assertion failed
+
+  on tests/web.tftest.hcl line 7, in run "motd_names_each_host":
+   7:     condition     = conn3x_file.web__motd["a"].content == "Hello from b\n"
+    ├────────────────
+    │ conn3x_file.web__motd["a"].content is "Hello from a\n"
+    ├────────────────
+    │ Diff: 
+    │     <<-EOT
+    │       - Hello from a
+    │       + Hello from b
+    │     EOT
+
+motd on host a is wrong
+  run "greeting_variable"... pass
+
+Failure! 1 passed, 1 failed.
+```
+
+`conn3x test` exits with `1` when any run fails and `0` when they all pass, so a CI job needs nothing more than the command.
+
+To show the results in a CI dashboard as well, write them as JUnit XML. New in v0.15.0:
+
+```sh
+conn3x test -junit-xml=results.xml
+```
+
+Each test file is a test suite, and each `run` block a test case, with a run's errors under its failure. The terminal output and the exit code stay the same, unless the file can't be written, which exits 1.
+
+## Fake the host facts
+
+A circuit that reads [host facts](/reference/host-facts) is the one place a plan does log in: `conn3x_host` reads the host over SSH while planning. Without a mock, a test against an address nobody answers on waits for the connection and then fails:
+
+```text
+Error: Invalid ssh
+
+  with data.conn3x_host.facts["web1"],
+  on main.circuit.hcl line 5, in data "conn3x_host" "facts":
+   5: data "conn3x_host" "facts" {
+
+ssh 192.0.2.10:22: dial tcp 192.0.2.10:22: i/o timeout (still not reachable
+after 3m0s)
+```
+
+With a mock, you choose the facts. This circuit picks the Apache package from the host's family:
+
+```hcl
+locals {
+  hosts = { web1 = "192.0.2.10" }
+}
+
+data "conn3x_host" "facts" {
+  for_each = local.hosts
+  ssh {
+    host = each.value
+    user = "root"
+  }
+}
+
+circuit "web" {
+  hosts = local.hosts
+
+  ssh {
+    user = "root"
+  }
+
+  step "apache" {
+    package {
+      name = data.conn3x_host.facts[each.key].os_family == "debian" ? "apache2" : "httpd"
+    }
+  }
+}
+```
+
+The test gives every host Red Hat facts by default with `mock_data`, then overrides one host to Debian for a single run with `override_data`:
+
+```hcl
+mock_provider "conn3x" {
+  mock_data "conn3x_host" {
+    defaults = {
+      os_family = "redhat"
+    }
+  }
+}
+
+run "redhat_gets_httpd" {
+  command = plan
+
+  assert {
+    condition     = conn3x_package.web__apache["web1"].name == "httpd"
+    error_message = "a Red Hat host should get httpd"
+  }
+}
+
+run "debian_gets_apache2" {
+  command = plan
+
+  override_data {
+    target = data.conn3x_host.facts["web1"]
+    values = {
+      os_family = "debian"
+    }
+  }
+
+  assert {
+    condition     = conn3x_package.web__apache["web1"].name == "apache2"
+    error_message = "a Debian host should get apache2"
+  }
+}
+```
+
+```text
+tests/facts.tftest.hcl... pass
+  run "redhat_gets_httpd"... pass
+  run "debian_gets_apache2"... pass
+
+Success! 2 passed, 0 failed.
+```
+
+That's both branches of the conditional tested, without a Debian server or a Rocky one.
+
+## Apply it on a container
+
+A plan can only tell you what Conn3x means to do. To find out whether the host ends up that way, leave out `command = plan` and the mock, and point the test at a real host. The container from [Try Conn3x locally](/tutorials/try-locally) is the cheapest one to hand. Start it from that tutorial's example directory:
+
+```sh
+cd conn3x/examples/try-it-locally
+./up.sh
+conn3x init
+```
+
+Then add `tests/try.tftest.hcl`:
+
+```hcl
+run "configure_the_box" {
+  assert {
+    condition     = conn3x_package.try__tools["box"].installed_version != ""
+    error_message = "tree was not installed."
+  }
+
+  assert {
+    condition     = conn3x_user.try__deploy_user["box"].home == "/home/deploy"
+    error_message = "The deploy user has the wrong home directory."
+  }
+
+  assert {
+    condition     = conn3x_file.try__motd["box"].sha256 == sha256("Hello from box, set up by Conn3x.\n")
+    error_message = "/etc/motd on the host doesn't match the circuit."
+  }
+}
+```
+
+A run without `command` applies, so these conditions check what the host reported back: the version of `tree` that `dnf` installed, the home directory `useradd` gave `deploy`, and the checksum of the file as it landed.
+
+```sh
+conn3x test
+```
+
+```text
+tests/try.tftest.hcl... pass
+  run "configure_the_box"... pass
+
+Success! 1 passed, 0 failed.
+```
+
+Add `-verbose` to print the state each run left behind, the same view `conn3x show` gives. If the container isn't running, the run fails once the SSH retries run out:
+
+```text
+Error: Invalid ssh
+
+  with conn3x_package.try__tools["box"],
+  on main.circuit.hcl line 12, in circuit "try":
+  12:     package {
+
+ssh 127.0.0.1:2222: dial tcp 127.0.0.1:2222: connect: connection refused
+(still not reachable after 3m0s)
+```
+
+### Check that a second plan is empty
+
+The check that matters most before you [share a circuit](/guides/share-a-circuit) is that a plan after the apply says `No changes.` Since v0.12.0, a run does that check for you when you set `idempotent = true`:
+
+```hcl
+run "configure_the_box" {
+  idempotent = true
+}
+```
+
+After the apply, the run plans again. If that plan would change anything, the run fails and names each resource and what would happen to it:
+
+```text
+Error: Not idempotent
+
+The plan after the apply isn't empty:
+  - conn3x_command.try__migrate["box"] would be updated in-place
+```
+
+`idempotent` needs a run that applies, so it's an error with `command = plan`. It also can't be combined with `replace` in `plan_options`.
+
+### Test services on a systemd container
+
+A circuit that starts services needs a host that boots systemd. Conn3x publishes three, built from the same files its own end-to-end tests use: `ghcr.io/conn3xorg/test-rocky10`, `test-debian13` and `test-ubuntu2404`, for amd64 and arm64, rebuilt every week and signed. Start one with Podman and give root your key:
+
+```sh
+podman run -d --name web1 --systemd=always -p 127.0.0.1:2222:22 ghcr.io/conn3xorg/test-rocky10
+podman exec -i web1 sh -c 'cat > /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys' < ~/.ssh/id_ed25519.pub
+```
+
+Point the circuit's `ssh` block at `127.0.0.1`, port `2222`, user `root`, and the run applies to a host where `service` steps and handlers work. Remove it with `podman rm -f web1` when the test is done, so the next one starts clean. These images are for throwaway containers only: root logs in with whatever key you add, and nothing else about them is hardened.
+
+To check an image before you use it:
+
+```sh
+cosign verify ghcr.io/conn3xorg/test-rocky10 \
+  --certificate-identity-regexp 'https://github.com/conn3xorg/conn3x/.github/workflows/test-images.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+### Let the test start its own host
+
+Since v0.20.0, a test file can start the container itself and remove it at the end, so nobody has to remember to. Put a `conn3x_test_container` in a small setup module:
+
+```hcl
+# tests/setup/main.tf
+resource "conn3x_test_container" "web1" {
+  image = "ghcr.io/conn3xorg/test-rocky10"
+}
+
+output "port" { value = conn3x_test_container.web1.port }
+output "key" { value = conn3x_test_container.web1.private_key_file }
+output "known_hosts" { value = conn3x_test_container.web1.known_hosts_file }
+```
+
+Give the circuit's `ssh` block variables for the three, then load the setup module in the first run and pass its outputs on:
+
+```hcl
+run "host" {
+  module {
+    source = "./tests/setup"
+  }
+}
+
+run "converge" {
+  variables {
+    port        = run.host.port
+    key         = run.host.key
+    known_hosts = run.host.known_hosts
+  }
+  idempotent = true
+}
+```
+
+The setup run starts the image, waits for systemd to finish booting, makes a key for root and pins the container's host key. The circuit then logs in at `127.0.0.1` as `root`. When the file is done, `conn3x test` destroys the later runs first, so the circuit's steps go while the container is still up, and then the container goes too. It needs Podman or Docker on the machine running the test: `runtime` picks one, and it defaults to Podman when it's installed. Under Docker, the container shares the host's cgroup namespace, which systemd needs, but it doesn't run privileged. Each container carries the label `io.conn3x.test-container=true`, so if a run is killed halfway, `podman ps --filter label=io.conn3x.test-container=true` finds what it left.
+
+To test on more than one distribution in the same run, add a container per image. The circuit's `known_hosts_file` is one file, so give the others a host object with their own `port`, `private_key_file` and `host_key`, which `conn3x_test_container` outputs:
+
+```hcl
+resource "conn3x_test_container" "debian" {
+  image = "ghcr.io/conn3xorg/test-debian13"
+}
+
+output "debian" {
+  value = {
+    address          = conn3x_test_container.debian.address
+    port             = conn3x_test_container.debian.port
+    private_key_file = conn3x_test_container.debian.private_key_file
+    host_key         = conn3x_test_container.debian.host_key
+  }
+}
+```
+
+Then the circuit takes it as `hosts = { web1 = "127.0.0.1", debian = var.debian }`, and the converge run passes `debian = run.host.debian`.
+
+### Test on a cloud VM
+
+Some things only show up on a real machine: a cloud image's own packages, its kernel, its sshd. The setup module doesn't have to start a container. It can create a VM with any provider, and the circuit takes its address the same way. This one makes a small EC2 instance:
+
+```hcl
+# tests/setup-aws/main.tf
+terraform {
+  required_providers {
+    aws   = { source = "hashicorp/aws" }
+    tls   = { source = "hashicorp/tls" }
+    local = { source = "hashicorp/local" }
+  }
+}
+
+variable "allow_from" {
+  type        = string
+  description = "The CIDR allowed to reach port 22, such as your IP with /32."
+}
+
+provider "aws" {
+  region = "us-west-2"
+}
+
+resource "tls_private_key" "login" {
+  algorithm = "ED25519"
+}
+
+resource "tls_private_key" "host" {
+  algorithm = "ED25519"
+}
+
+resource "local_sensitive_file" "key" {
+  content         = tls_private_key.login.private_key_openssh
+  filename        = "${path.root}/.test-key"
+  file_permission = "0600"
+}
+
+resource "aws_key_pair" "login" {
+  key_name_prefix = "conn3x-test-"
+  public_key      = tls_private_key.login.public_key_openssh
+}
+
+resource "aws_security_group" "ssh" {
+  name_prefix = "conn3x-test-"
+  ingress {
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allow_from]
+  }
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+}
+
+data "aws_ssm_parameter" "ubuntu" {
+  name = "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"
+}
+
+resource "aws_instance" "web1" {
+  ami                    = data.aws_ssm_parameter.ubuntu.value
+  instance_type          = "t3.micro"
+  key_name               = aws_key_pair.login.key_name
+  vpc_security_group_ids = [aws_security_group.ssh.id]
+  user_data = join("\n", ["#cloud-config", yamlencode({
+    ssh_deletekeys = true
+    ssh_genkeytypes = []
+    ssh_keys = {
+      ed25519_private = tls_private_key.host.private_key_openssh
+      ed25519_public  = tls_private_key.host.public_key_openssh
+    }
+  })])
+  tags = { Name = "conn3x-test", owner = "conn3x-ci" }
+}
+
+output "address" { value = aws_instance.web1.public_ip }
+output "key" { value = local_sensitive_file.key.filename }
+output "host_key" { value = trimspace(tls_private_key.host.public_key_openssh) }
+```
+
+The setup module makes the instance's host key itself and hands it to cloud-init, so the circuit pins it with `host_key` instead of trusting whatever key answers first. The private half travels in the instance's user data, where anything running on the instance can read it, which is fine for a VM that lives for one test.
+
+The circuit takes the three outputs as variables:
+
+```hcl
+circuit "web" {
+  hosts = {
+    web1 = { address = var.address, host_key = var.host_key }
+  }
+
+  ssh {
+    user             = "ubuntu"
+    private_key_file = var.key
+    become           = true
+  }
+
+  step "motd" {
+    file {
+      path    = "/etc/motd"
+      content = "Managed by Conn3x.\n"
+    }
+  }
+}
+```
+
+And the test file passes them on:
+
+```hcl
+run "host" {
+  module {
+    source = "./tests/setup-aws"
+  }
+  variables {
+    allow_from = "203.0.113.7/32" # your IP
+  }
+}
+
+run "converge" {
+  variables {
+    address  = run.host.address
+    key      = run.host.key
+    host_key = run.host.host_key
+  }
+  idempotent = true
+
+  assert {
+    condition     = conn3x_file.web__motd["web1"].sha256 == sha256("Managed by Conn3x.\n")
+    error_message = "/etc/motd doesn't match the circuit."
+  }
+}
+```
+
+Run `conn3x init` first, which installs the AWS, TLS and local providers, then `conn3x test` with AWS credentials in the environment. The first plan waits while the instance boots, since a dial keeps trying for the `ssh` block's `timeout`. In us-west-2 the whole file, from creating the instance to terminating it, took under 90 seconds. At the end the instance, its security group, the key pair and the local key file are all destroyed. If a run is killed halfway, look for instances tagged `Name = conn3x-test`.
+
+On Azure or Google Cloud, the setup module would create the VM and output the same three values. Only the AWS version above has been run so far.
+
+### What the clean-up leaves on the host
+
+When the file finishes, `conn3x test` destroys what it applied, and destroying a step does what its [`on_remove`](/reference/circuits/removal) says. Most modules default to `"forget"`, so after the run above `tree`, the `deploy` user and `/etc/motd` are all still on the container. Conn3x only dropped them from the test's state.
+
+That's what you want on a throwaway container: `./down.sh` removes the lot, and `./up.sh` gives the next test a clean host. If the circuit sets `on_remove = "delete"` on its steps, the clean-up undoes them too. With that set on all three steps here, the container has no `tree`, no `deploy` and no `/etc/motd` after the test. Never point an apply test at a server you care about.
+
+## What conn3x test doesn't cover
+
+- **Values from earlier runs in assertions.** A later run can use an earlier run's outputs as `run.<name>.<output>` in its `variables` block, but not in an `assert` condition, and it can't see the earlier run's steps at all. Add an `output` to the circuit for anything you want to carry from one run to the next.
+- **Made-up attributes under a mock.** The mock invents values for attributes the host would report, such as `revision`, `installed_version` and `uid`. Assert on what the circuit sets, and on host-reported attributes only in runs against a real host.
+- **Services on the tutorial container.** It runs `sshd` without systemd, so `service` steps and handlers fail there with `System has not been booted with systemd as init system`. Use one of the [systemd test images](#test-services-on-a-systemd-container) instead.

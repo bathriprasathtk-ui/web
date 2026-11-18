@@ -13,12 +13,15 @@ type Circuit = {
   version: string;
   tags: string[];
   tested: string[];
+  device?: { tested: string; provider: string; providerVersion: string; maintainer: string };
   category: string;
   official: boolean;
 };
 import categoryList from "../data/categories.json";
+import creditData from "../data/credits.json";
 import { allGrades } from "../lib/grade-data";
 
+const credits = creditData as Record<string, { text: string; links: string[][] }>;
 const grades = (await allGrades()) as Record<string, { grade: string; passing: boolean }>;
 
 const files = import.meta.glob<{ default: Circuit }>("../data/circuits/*.json", { eager: true });
@@ -60,7 +63,7 @@ const source = (c: Circuit) => `source = "github.com/${c.repo}?ref=${c.version}"
           <span class="visually-hidden">Search circuits</span>
           <input id="q" type="search" placeholder="Search circuits" autocomplete="off" />
         </label>
-        <a class="btn" href="/build">Build a config</a>
+        <a class="btn" href="/build">Build a configuration</a>
         <a class="btn btn-ghost" href="#share">Share yours</a>
       </div>
       <div class="filters" role="group" aria-label="Filter by category">
@@ -79,6 +82,13 @@ const source = (c: Circuit) => `source = "github.com/${c.repo}?ref=${c.version}"
             {c.official && <span class="badge">Official</span>}
           </div>
           <p class="desc">{c.description}</p>
+          {credits[c.name] && (
+            <p class="meta">
+              {credits[c.name].text}: {credits[c.name].links.map(([label, href], i) => (
+                <>{i > 0 && (i === credits[c.name].links.length - 1 ? " and " : ", ")}<a href={href}>{label}</a></>
+              ))}.
+            </p>
+          )}
           <p class="meta">
             <span>{c.repo}</span> · <span>{c.version}</span>
             {c.official && <> · <a href={`https://docs.conn3x.org/circuits/${c.name}`}>Docs</a></>}
@@ -86,9 +96,18 @@ const source = (c: Circuit) => `source = "github.com/${c.repo}?ref=${c.version}"
           </p>
           <pre><code>{source(c)}</code></pre>
           <button class="copy" type="button" data-copy={source(c)}>Copy</button>
-          <p class="tested">
-            Tested on {c.tested.map((t) => distro[t] ?? t).join(", ")}
-          </p>
+          {c.device ? (
+            <>
+              <p class="tested"><a href="https://docs.conn3x.org/reference/maturity">Experimental</a>: tested on {c.device.tested}, virtual, not hardware</p>
+              <p class="tested">
+                Uses the <a href={`https://search.opentofu.org/provider/${c.device.provider}/v${c.device.providerVersion}`}>{c.device.provider}</a> provider {c.device.providerVersion}, maintained by {c.device.maintainer}
+              </p>
+            </>
+          ) : (
+            <p class="tested">
+              Tested on {c.tested.map((t) => distro[t] ?? t).join(", ")}
+            </p>
+          )}
           <ul class="tags">
             {c.tags.map((t) => <li>{t}</li>)}
           </ul>

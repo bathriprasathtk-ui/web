@@ -11,6 +11,7 @@ const modules = readdirSync(new URL("./src/content/docs/modules/", import.meta.u
   .map((f) => `modules/${f.slice(0, -3)}`)
   .sort();
 const isWindows = (slug) => slug.startsWith("modules/windows_");
+const isEOS = (slug) => slug.startsWith("modules/eos_");
 
 export default defineConfig({
   site: "https://docs.conn3x.org",
@@ -18,8 +19,10 @@ export default defineConfig({
   trailingSlash: "never",
   build: {
     format: "file",
-    // Stylesheets ship as files so the CSP needs no style hashes.
-    inlineStylesheets: "never",
+    // Inline, so a page's first paint doesn't wait on a stylesheet round
+    // trip; scripts/csp.mjs hashes each <style> into the CSP (one hash, as
+    // every page shares the same CSS).
+    inlineStylesheets: "always",
   },
   integrations: [
     starlight({
@@ -39,23 +42,36 @@ export default defineConfig({
         ThemeSelect: "./src/components/ThemeSelect.astro",
       },
       lastUpdated: false,
+      routeMiddleware: "./src/routeData.ts",
       head: [
+        // The body font is the text a page paints last; fetch it with the HTML,
+        // not after the CSS, so it lands before the first paint on most loads.
+        { tag: "link", attrs: { rel: "preload", href: "/fonts/schibsted-grotesk-latin-wght-normal.woff2", as: "font", type: "font/woff2", crossorigin: "" } },
         { tag: "meta", attrs: { property: "og:image", content: "https://docs.conn3x.org/og.png" } },
         { tag: "meta", attrs: { name: "twitter:card", content: "summary_large_image" } },
         { tag: "meta", attrs: { name: "twitter:image", content: "https://docs.conn3x.org/og.png" } },
+        // Cloudflare Web Analytics, shared with conn3x.org; filter by host to see the docs.
+        { tag: "script", content: 'if(/(^|\\.)conn3x\\.org$/.test(location.hostname)){const s=document.createElement("script");s.defer=true;s.src="https://static.cloudflareinsights.com/beacon.min.js";s.dataset.cfBeacon=\'{"token":"a6d1b39fdbab4414a50520fcbe318d8a"}\';document.head.append(s)}' },
       ],
       sidebar: [
-        { label: "Start here", items: ["install", "get-started", "concepts"] },
+        { label: "Start here", items: ["install", "get-started", "concepts", "troubleshooting", { slug: "network-devices", badge: { text: "Experimental", variant: "caution" } }] },
         {
           label: "Tutorials",
           items: [
             { slug: "tutorials", label: "Overview" },
-            ...["try-locally", "first-server", "digitalocean", "google-cloud", "azure", "aws", "bastion", "secrets", "drift-in-ci", "migrate-ansible", "bigquery"].map((page) => `tutorials/${page}`),
+            ...["try-locally", "first-server", "digitalocean", "google-cloud", "azure", "aws", "bastion", "secrets", "drift-in-ci", "migrate-ansible", "bigquery", "private-ai-box", "active-directory-lab"].map((page) => `tutorials/${page}`),
           ],
         },
         {
           label: "Guides",
-          items: ["guides/provision-and-configure", "guides/bastions", "guides/drift", "guides/paths-as-root", "guides/share-a-circuit", "guides/migrate-from-ansible", "guides/migrate-from-terraform"],
+          items: ["guides/provision-and-configure", "guides/hosts-from-cloud-tags", "guides/hosts-from-netbox", "guides/bastions", "guides/drift", "guides/compliance-checks", "guides/adopt-servers", "guides/database", "guides/secrets-from-managers", "guides/paths-as-root", "guides/share-a-circuit", "guides/test-a-circuit", "guides/web-ui", "guides/migrate-from-ansible", "guides/ansible-convert-coverage", "guides/migrate-from-terraform"],
+        },
+        {
+          label: "Compare",
+          items: [
+            { slug: "compare/terraform-and-ansible", label: "Terraform and Ansible" },
+            { slug: "compare/ansible", label: "Ansible" },
+          ],
         },
         {
           label: "Circuits",
@@ -68,6 +84,11 @@ export default defineConfig({
             { slug: "reference/circuits", label: "Overview" },
             ...["hosts", "ssh", "steps", "handlers", "removal", "secrets", "addresses", "expressions"].map((page) => `reference/circuits/${page}`),
             "reference/host-facts",
+            "reference/host-packages-and-services",
+            "reference/host-files-and-commands",
+            "reference/eos-device",
+            "reference/security-model",
+            "reference/assurance-case",
           ],
         },
         {
@@ -75,7 +96,7 @@ export default defineConfig({
           collapsed: true,
           items: [
             { slug: "reference/cli", label: "Overview" },
-            ...["init", "validate", "plan", "apply", "destroy", "drift", "convert-ansible", "show", "state", "output", "fmt", "providers", "version"].map(
+            ...["init", "validate", "plan", "apply", "destroy", "drift", "run", "json-output", "convert-ansible", "generate-step", "lint", "lsp", "mcp", "show", "state", "output", "fmt", "providers", "version"].map(
               (cmd) => `reference/cli/${cmd}`,
             ),
           ],
@@ -84,12 +105,18 @@ export default defineConfig({
           label: "Modules",
           collapsed: true,
           items: [
-            ...modules.filter((m) => !isWindows(m)),
+            ...modules.filter((m) => !isWindows(m) && !isEOS(m)),
             {
               label: "Windows (preview)",
               collapsed: true,
               badge: { text: "Experimental", variant: "caution" },
               items: modules.filter(isWindows),
+            },
+            {
+              label: "Arista EOS",
+              collapsed: true,
+              badge: { text: "Experimental", variant: "caution" },
+              items: modules.filter(isEOS),
             },
           ],
         },
@@ -99,6 +126,7 @@ export default defineConfig({
           items: ["plan-reads", "state", "revision-and-handlers", "connections"].map((page) => `internals/${page}`),
         },
         "reference/glossary",
+        { slug: "reference/maturity", label: "Maturity labels" },
         { label: "Get involved", items: ["contribute", "style", "roadmap"] },
       ],
     }),

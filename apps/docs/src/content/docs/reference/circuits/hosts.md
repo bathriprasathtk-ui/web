@@ -115,6 +115,72 @@ circuit "app" {
 
 For a complete example with DigitalOcean droplets and host keys pinned at creation, see [Provision and configure](/guides/provision-and-configure).
 
+### From an Ansible inventory
+
+Already have an inventory? Keep it. `provider::conn3x::inventory` reads one group from an INI or YAML inventory and returns it as host objects, so you don't retype the list. New in v0.16.0.
+
+```ini
+# inventory.ini
+[web]
+web1 ansible_host=203.0.113.10
+web2 ansible_host=203.0.113.11 ansible_port=2222 role=canary
+
+[web:vars]
+role=app
+```
+
+```hcl
+terraform {
+  required_providers {
+    conn3x = { source = "terraform.io/builtin/conn3x" }
+  }
+}
+
+circuit "web" {
+  hosts = provider::conn3x::inventory("${path.module}/inventory.ini", "web")
+
+  ssh {
+    user = "deploy"
+  }
+
+  step "motd" {
+    file {
+      path    = "/etc/motd"
+      content = "This is ${each.key}, a ${each.value.vars.role} server.\n"
+    }
+  }
+}
+```
+
+Provider functions need their provider in `required_providers`, as in OpenTofu. Conn3x is built in, so that's the only setup.
+
+Each host comes back as a [host object](#host-object-fields), keyed by its inventory name:
+
+| Inventory | Host object |
+| --- | --- |
+| `ansible_host` | `address`. Without it, the address is the host's name. |
+| `ansible_port` | `port` |
+| `ansible_user` | `user` |
+| `ansible_ssh_private_key_file` | `private_key_file` |
+| Every variable, `ansible_*` ones included | `vars`, a map of strings |
+
+A host that doesn't set one of the first four leaves it to the circuit's `ssh` block. Above, `web2` gets `role = "canary"` and `web1` gets `app`.
+
+`vars` also takes in the `group_vars/` and `host_vars/` directories beside the inventory, and resolves everything the way Ansible does:
+
+1. The inventory file's group variables: `all`'s, then each group's from the outermost in.
+2. `group_vars/all`, then `group_vars/<group>`, from the outermost group in.
+3. The inventory file's host variables.
+4. `host_vars/<host>`.
+
+For each group or host, Conn3x reads a file called `web`, `web.yml`, `web.yaml` or `web.json`, or every such file in a `web/` directory, in name order. Only plain values come through: a list or a map is left out, since `vars` holds strings. So is a value encrypted with Ansible Vault. A whole file encrypted with Vault is an error.
+
+The group takes in its child groups' hosts, and `"all"` takes in every host. An unknown group is an error that lists the groups the file has. A relative path is relative to where you run Conn3x, which is why the example starts with `path.module`.
+
+Host ranges expand as in Ansible: `web[01:20]` is `web01` to `web20`, `db-[a:f]` is `db-a` to `db-f`, and `[1:9:2]` counts in twos.
+
+Not read yet: `group_vars/` beside the playbook rather than the inventory, and dynamic inventory scripts or plugins.
+
 ## Host object fields
 
 | Field | Type | Description |
@@ -125,8 +191,10 @@ For a complete example with DigitalOcean droplets and host keys pinned at creati
 | `private_key_file` | string | Overrides the `ssh` block's `private_key_file`. |
 | `host_key` | string | Overrides the `ssh` block's `host_key`. Use it to pin each host's own key. |
 | `jump_hosts` | list of strings | Overrides the `ssh` block's `jump_hosts`. An empty list connects to this host directly. |
+| `legacy_algorithms` | bool | Overrides the `ssh` block's `legacy_algorithms`, so only the old devices get SHA-1. |
+| `container` | string | Reaches this host as the named container instead of over SSH. See [Containers instead of SSH](/reference/circuits/ssh#containers-instead-of-ssh). Since v0.23.0. |
 
-Only these five settings can be overridden per host. The others, such as `become`, `known_hosts_file` and `timeout`, come from the `ssh` block for every host.
+Only these settings can be overridden per host. The others, such as `become`, `known_hosts_file` and `timeout`, come from the `ssh` block for every host.
 
 A host object can hold fields of your own as well. Conn3x doesn't use them to connect, and steps can read them as `each.value.FIELD`:
 
@@ -156,8 +224,9 @@ What a host object can't hold is an ssh setting that only the `ssh` block takes:
 Error: Unsupported field in host object
 
 Host "web1" sets "become", which only the circuit's ssh block takes. A host
-object can set address, user, port, private_key_file, host_key and
-jump_hosts, plus any fields of your own to read with each.value.
+object can set address, user, port, private_key_file, host_key, jump_hosts,
+legacy_algorithms and container, plus any fields of your own to read with
+each.value.
 ```
 
 See [The ssh block](/reference/circuits/ssh#precedence) for how host objects, the `ssh` block and an SSH config file combine.
@@ -167,6 +236,64 @@ See [The ssh block](/reference/circuits/ssh#precedence) for how host objects, th
 Inside a step's module block, `each.key` is the host's name and `each.value` is its entry in `hosts`: the address string, or the host object. With a set of addresses, both are the address.
 
 The same holds in a step with its own `for_each`. There, `item.key` and `item.value` are the item, and `each` is still the host. See [Steps](/reference/circuits/steps#for_each).
+
+## Layered host data
+
+New in v0.18.0. Set a value once for every host, then override it for an environment, a group or one host, the way Puppet's Hiera does. The layers are YAML files in a directory, and a `hierarchy.yaml` there lists them, highest priority first:
+
+```yaml
+hierarchy:
+  - hosts/{host}.yaml
+  - groups/{group}.yaml
+  - env/{env}.yaml
+  - common.yaml
+```
+
+`provider::conn3x::hostdata` reads them for one host:
+
+```hcl
+step "ntp" {
+  file {
+    path    = "/etc/chrony.d/servers.conf"
+    content = join("\n", [
+      for s in provider::conn3x::hostdata("${path.module}/data", {
+        host  = each.key
+        group = ["web", "eu"]
+        env   = var.env
+      }).values.ntp_servers : "server ${s} iburst"
+    ])
+  }
+}
+```
+
+- Each top-level key comes from the first layer that sets it. So `ntp_servers` in `groups/eu.yaml` beats the one in `common.yaml`, and `hosts/web1.yaml` beats both.
+- A placeholder given a list, such as `group` above, makes one layer per item, in the order you give them.
+- `values` keeps the YAML types, numbers and lists included. `from` maps each key to the file it came from. Put it in an output when you need to see why a host got a value.
+- A layer whose file doesn't exist is skipped. A placeholder that `vars` doesn't set is an error, so a typo can't quietly skip a layer.
+- Write the hierarchy as a block list, or quote each path: in a `[ ]` list, YAML reads `{host}` as a mapping.
+- The function refuses a SOPS-encrypted layer, since whatever it returns can land in plan and state. Read a hierarchy with secrets in it through the ephemeral reader below.
+
+### Encrypted layers
+
+Since v0.19.0, `ephemeral "conn3x_hostdata"` reads the same hierarchy with the same rule, first layer wins, and decrypts the layers that are encrypted with SOPS and age, such as a `common.sops.yaml` holding each environment's database password. It's ephemeral, so its values never reach plan or state. Use them in write-only arguments, such as `content_wo` and `password_wo`.
+
+```hcl
+ephemeral "conn3x_hostdata" "web1" {
+  dir  = "${path.module}/data"
+  vars = { host = "web1", group = ["web"] }
+}
+
+resource "conn3x_file" "db_password" {
+  path       = "/etc/db_password"
+  content_wo = ephemeral.conn3x_hostdata.web1.values.db_password
+  mode       = "0600"
+  # ssh { ... }
+}
+```
+
+It finds the age key the way sops does: `SOPS_AGE_KEY`, `SOPS_AGE_KEY_FILE`, or `sops/age/keys.txt` in your config directory. A value from an encrypted layer is a string, with nested keys joined by dots, such as `db.password`, as [`conn3x_secrets`](/reference/circuits/secrets#sops-files) gives them, and `from` names the file it came from.
+
+Provider functions need `conn3x` in `required_providers`, as for the [inventory function](#from-an-ansible-inventory).
 
 ## Instance keys
 

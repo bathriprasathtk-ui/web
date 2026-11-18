@@ -52,6 +52,8 @@ Conn3x sends keepalives only in these two cases, when it hands out a pooled conn
 
 A dial connects, checks the host key, and logs in. When the host doesn't answer, Conn3x keeps trying until the `ssh` block's `timeout` (3 minutes by default) has passed, waiting 1, 2 and 4 seconds between the first attempts and 8 seconds after that. Each attempt has 15 seconds to finish, across all its jump hosts.
 
+Every host behind a jump host opens its own connection to it, and sshd's `MaxStartups` refuses new logins past 10 at once by default. So since v0.20.0, Conn3x has at most 8 logins in progress through any one jump host; the rest wait their turn, within the same timeout. That keeps a fleet behind one bastion safe at any `-parallelism`.
+
 These failures end the dial at once, without waiting out the `timeout`:
 
 - a host key that isn't recorded, or doesn't match;
@@ -98,7 +100,7 @@ For the settings themselves, see [Jump hosts](/reference/circuits/ssh#jump-hosts
 
 ## What runs on the connection
 
-Every command runs as `/bin/sh -c` with `LC_ALL=C`, without a terminal. With `become = true`, the first command on a connection checks whether sudo needs a password, and the answer holds for that connection. [become](/reference/circuits/ssh#become) describes the check.
+Every command runs as `/bin/sh -c` with `LC_ALL=C`, without a terminal. With `become = true`, the first command on a connection checks whether sudo needs a password, and the answer holds for that connection. When it does, each command waits for sudo's prompt before the password is written, and for the command to start before its input is. [become](/reference/circuits/ssh#become) describes the check.
 
 Some changes on one host take turns even though they arrive on separate sessions: package installs run one at a time, and so do service changes and `line` or `block` edits to the same file. Other steps on the same host, and every other host, run in parallel, up to `-parallelism`.
 

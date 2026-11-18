@@ -53,7 +53,7 @@ n8n speaks plain HTTP on `127.0.0.1:5678`. Put a proxy in front for TLS, such as
 
 ```hcl
 module "caddy" {
-  source = "github.com/conn3xorg/circuit-caddy?ref=v0.2.2"
+  source = "github.com/conn3xorg/circuit-caddy?ref=v0.3.0"
 
   hosts                = { automation = "192.168.1.50" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -90,7 +90,7 @@ variable "db_password" {
 }
 
 module "postgres" {
-  source = "github.com/conn3xorg/circuit-postgres?ref=v0.2.1"
+  source = "github.com/conn3xorg/circuit-postgres?ref=v0.3.0"
 
   hosts                = { automation = "192.168.1.50" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -238,4 +238,4 @@ n8n itself is not open source in the OSI sense. It's [fair-code](https://faircod
 
 - Repository: [conn3xorg/circuit-n8n](https://github.com/conn3xorg/circuit-n8n). This page covers [v0.1.3](https://github.com/conn3xorg/circuit-n8n/tree/v0.1.3); the repository's [tags](https://github.com/conn3xorg/circuit-n8n/tags) list every release.
 - Examples: [examples/local](https://github.com/conn3xorg/circuit-n8n/tree/v0.1.3/examples/local).
-- Related circuits: [PostgreSQL](/circuits/postgres), [Caddy](/circuits/caddy), [Podman](/circuits/podman), [restic](/circuits/restic), [Proxmox VE](/circuits/proxmox), [Forgejo](/circuits/forgejo), [GitLab CE](/circuits/gitlab), [Cockpit](/circuits/cockpit), [Fleet](/circuits/fleet).
+- Related circuits: [PostgreSQL](/circuits/postgres), [Caddy](/circuits/caddy), [Podman](/circuits/podman), [restic](/circuits/restic), [Conn3x web UI](/circuits/conn3x-ui), [Proxmox VE](/circuits/proxmox), [Forgejo](/circuits/forgejo), [GitLab CE](/circuits/gitlab), [Cockpit](/circuits/cockpit), [Fleet](/circuits/fleet), [Homepage](/circuits/homepage), [Home Assistant](/circuits/homeassistant), [Kestra](/circuits/kestra), [Lempa homelab](/circuits/lempa-homelab), [Mini homelab](/circuits/mini-homelab).

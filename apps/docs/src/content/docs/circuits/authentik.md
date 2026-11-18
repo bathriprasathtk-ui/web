@@ -39,7 +39,7 @@ variable "bootstrap_token" {
 }
 
 module "postgres" {
-  source = "github.com/conn3xorg/circuit-postgres?ref=v0.2.1"
+  source = "github.com/conn3xorg/circuit-postgres?ref=v0.3.0"
 
   hosts                = { auth1 = "192.168.1.50" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -200,4 +200,4 @@ MPL-2.0. See [LICENSE](https://github.com/conn3xorg/circuit-authentik/blob/v0.1.
 
 - Repository: [conn3xorg/circuit-authentik](https://github.com/conn3xorg/circuit-authentik). This page covers [v0.1.2](https://github.com/conn3xorg/circuit-authentik/tree/v0.1.2); the repository's [tags](https://github.com/conn3xorg/circuit-authentik/tags) list every release.
 - Examples: [examples/local](https://github.com/conn3xorg/circuit-authentik/tree/v0.1.2/examples/local).
-- Related circuits: [PostgreSQL](/circuits/postgres), [Caddy](/circuits/caddy), [Podman](/circuits/podman), [restic](/circuits/restic), [Users](/circuits/users), [LLDAP](/circuits/lldap), [OpenLDAP](/circuits/openldap), [FreeIPA](/circuits/freeipa), [Keycloak](/circuits/keycloak), [OpenBao](/circuits/openbao), [Infisical](/circuits/infisical).
+- Related circuits: [PostgreSQL](/circuits/postgres), [Caddy](/circuits/caddy), [Podman](/circuits/podman), [restic](/circuits/restic), [Users](/circuits/users), [Active Directory](/circuits/active-directory), [LLDAP](/circuits/lldap), [OpenLDAP](/circuits/openldap), [FreeIPA](/circuits/freeipa), [Keycloak](/circuits/keycloak), [OpenBao](/circuits/openbao), [Infisical](/circuits/infisical), [Passbolt CE](/circuits/passbolt), [Teleport](/circuits/teleport).

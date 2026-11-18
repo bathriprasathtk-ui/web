@@ -35,12 +35,19 @@ Conn3x uses SSH and nothing else. By default, it installs nothing on the hosts. 
 | `become` | bool | `false` | Run every command as root through `sudo`. |
 | `become_password_file` | string | None | Path to a file holding the sudo password, for hosts where sudo asks for one. Read only when `become` is `true`. |
 | `timeout` | string | `"3m"` | How long to keep retrying while a host doesn't answer, as a duration such as `"90s"` or `"5m"`. |
+| `confirm_after` | string | `"30s"` | Arista EOS steps only, since v0.9.0. How long to wait after committing a change before logging in again to confirm it, from `"5s"` to under `"4m"`. See [Network devices](/network-devices#why-it-waits-before-confirming). |
 | `jump_hosts` | list of strings | None | Hosts to connect through first, in order, like `ssh -J`. See [Jump hosts](#jump-hosts). |
+| `proxy_command` | list of strings | None | A command whose stdin and stdout carry the SSH connection, like OpenSSH's `ProxyCommand`, given as a list of arguments. `%h` is the host, `%p` the port, `%r` the user and `%%` a percent sign. It runs directly, not through a shell, on the machine running Conn3x. A host or user that starts with `-` or holds whitespace is refused. It can't be combined with `jump_hosts`. See [Hosts behind SSM or IAP](#hosts-behind-ssm-or-iap). Since v0.20.0. |
+| `legacy_algorithms` | bool | `false` | Also offers this host the SHA-1 algorithms an old device needs: `ssh-rsa` host key signatures, SHA-1 Diffie-Hellman key exchange and `hmac-sha1`. They go after the modern ones, and only to this host, never to a jump host. Classic Cisco IOS 15 needs it. SHA-1 is weaker, so set it only for devices that can't do better. Since v0.20.0. |
 | `ssh_config_file` | string | None | An OpenSSH client config file to read settings from, such as `"~/.ssh/config"`. Conn3x reads no SSH config unless you set this. See [SSH config files](#ssh-config-files). |
+| `container` | string | None | Reach the host as this container, with `container_engine`'s exec, instead of SSH. Usually set per host in a host object. See [Containers instead of SSH](#containers-instead-of-ssh). Experimental, since v0.23.0. |
+| `container_engine` | string | `"podman"` | With `container`: `"podman"`, `"docker"` or `"kubectl"`. Since v0.23.0. |
+| `kube_namespace` | string | The context's | With `container_engine = "kubectl"`: the pod's namespace. Since v0.23.0. |
+| `kube_context` | string | The current one | With `container_engine = "kubectl"`: the kubeconfig context. Since v0.23.0. |
 
 Paths that start with `~/` are relative to your home directory. Other relative paths are relative to the working directory, which `-chdir` sets.
 
-There is no argument for an inline private key or password, because resource arguments are stored in state. Point `private_key_file` at a key, or use the agent. A key file protected by a passphrase can't be read; load it into the agent instead and leave `private_key_file` unset.
+There is no argument for an inline private key or password, because resource arguments are stored in state. Point `private_key_file` at a key, use the agent, or, since v0.16.0, give keys from a secret store to the provider block: see [Keys from a secret store](#keys-from-a-secret-store). A key file protected by a passphrase can't be read; load it into the agent instead and leave `private_key_file` unset.
 
 Every argument takes an expression, such as a variable. `conn3x validate` rejects a `timeout` that isn't a valid duration. A missing `user`, a port outside 1 to 65535, and a key file that can't be read are reported when Conn3x first connects, during `plan` or `apply`.
 
@@ -75,13 +82,40 @@ Both of `app1`'s instances log in with `~/.ssh/app1`. For the five settings a [h
 
 Conn3x builds each host's connection settings from up to three places. The first one that sets a value wins:
 
-1. The host's [host object](/reference/circuits/hosts#host-object-fields) in `hosts`, for `user`, `port`, `private_key_file`, `host_key` and `jump_hosts`.
+1. The host's [host object](/reference/circuits/hosts#host-object-fields) in `hosts`, for `user`, `port`, `private_key_file`, `host_key`, `jump_hosts` and `legacy_algorithms`.
 2. The circuit's `ssh` block.
 3. The file named in `ssh_config_file`, for `User`, `Port`, `IdentityFile`, `UserKnownHostsFile` and `ProxyJump`.
 
 When none of them sets a value, the default in the table above applies.
 
-`become`, `become_password_file`, `known_hosts_file`, `timeout` and `ssh_config_file` can't be set per host. They come from the `ssh` block for every host in the circuit, with `known_hosts_file` falling back to the config file's `UserKnownHostsFile`.
+`become`, `become_password_file`, `known_hosts_file`, `timeout`, `confirm_after` and `ssh_config_file` can't be set per host. They come from the `ssh` block for every host in the circuit, with `known_hosts_file` falling back to the config file's `UserKnownHostsFile`.
+
+## Keys from a secret store
+
+Keep your SSH keys in Vault, OpenBao or a cloud secret manager? Give them to the provider block, and they never touch the disk. New in v0.16.0.
+
+```hcl
+terraform {
+  required_providers {
+    conn3x = { source = "terraform.io/builtin/conn3x" }
+  }
+}
+
+ephemeral "vault_kv_secret_v2" "deploy_key" {
+  mount = "secret"
+  name  = "ssh/deploy"
+}
+
+provider "conn3x" {
+  private_keys = [ephemeral.vault_kv_secret_v2.deploy_key.data["private_key"]]
+}
+```
+
+Every login tries these keys after the step's `private_key_file` and before the SSH agent. With no agent running, they're enough on their own. A circuit in a module uses them too, since OpenTofu passes the default provider down.
+
+`private_keys` is write-only, so it takes an [ephemeral value](https://opentofu.org/docs/language/ephemeral-values/), and provider configuration isn't kept in state or in plan files. Feed it from an ephemeral resource, as above, or a variable with `ephemeral = true`. A plain variable's value is saved in a plan file, so it would undo the point.
+
+Keys are PEM or OpenSSH format, without a passphrase. A key Conn3x can't read stops the plan, and the error says which entry it is without quoting any of it.
 
 ## SSH config files
 
@@ -192,7 +226,12 @@ With `become = true`, every command Conn3x runs on the host runs as root through
 The first time Conn3x uses a host in a run, it asks whether sudo needs a password, by running `sudo -n true`:
 
 - If sudo needs no password, Conn3x runs commands with `sudo -n`.
-- If sudo needs a password, Conn3x reads it from `become_password_file`, checks it once with `sudo -v`, then passes it to `sudo -S` on standard input for each command. A trailing newline in the file is ignored. Without `become_password_file`, Conn3x stops with an error that says sudo needs a password.
+- If sudo needs a password, Conn3x reads it from `become_password_file` and runs each command with `sudo -k -S`. It writes the password to standard input only after sudo has printed its prompt, and the command's own input only after the command has started, so the password can't end up as input to the command. A wrong password stops the step at the prompt. A trailing newline in the file is ignored. Without `become_password_file`, Conn3x stops with an error that says sudo needs a password.
+
+Two things follow that you may notice on the host:
+
+- **Conn3x leaves no cached sudo credentials.** `-k` makes sudo ask every time and remember nothing, so a run never gives the login user's other sessions a passwordless sudo, even on a host that shares sudo's timestamp between sessions (`timestamp_type=global`).
+- **sudo's log has one line per command, unless the host agent is on.** Over the shell, every command Conn3x runs is its own `sudo`, so the host's sudo log shows each one. With the [host agent](/reference/maturity) started under `become`, sudo starts the agent once and logs that; what the agent then does as root isn't in sudo's log. If your audit trail relies on sudo's log, leave the agent off for those hosts, or record commands another way, such as auditd.
 
 The password goes from the file to the host and is never written to configuration, plans or state. The file's path is stored in state as part of the `ssh` block.
 
@@ -209,6 +248,34 @@ circuit "db" {
   }
 }
 ```
+
+## Tunnels to what only the host reaches
+
+New in v0.18.0. A circuit installs PostgreSQL on a private host, and then the `postgresql` provider has to create its databases, but it can't reach the private address. `ephemeral "conn3x_ssh_tunnel"` opens a port on the machine Conn3x runs on, for the length of the run, and forwards it over SSH to an address the host can reach, the way `ssh -L` does:
+
+```hcl
+ephemeral "conn3x_ssh_tunnel" "db" {
+  remote = "127.0.0.1:5432"
+
+  ssh {
+    host = "10.0.1.5"
+    user = "ops"
+  }
+}
+
+provider "postgresql" {
+  host = ephemeral.conn3x_ssh_tunnel.db.local_host
+  port = ephemeral.conn3x_ssh_tunnel.db.local_port
+}
+```
+
+- `remote` is what to reach, as the host sees it: `127.0.0.1:5432` for a database on its loopback, or `10.0.2.7:6379` for a cache beside it.
+- The `ssh` block is the same as anywhere else, so jump hosts, host keys and keys all work as they do for steps.
+- `local_host` is always `127.0.0.1`, and `local_port` is a free port, chosen each run, so nothing else on the machine has to give one up.
+- It's ephemeral: none of it lands in state or in a saved plan, and the tunnel closes when the run is done with it.
+- As with `ssh -L`, any user on the machine can connect to the port while the run lasts, and reach `remote` as the SSH user. On a shared CI runner, keep that in mind.
+
+A provider that uses it opens the tunnel at plan and again at apply, so the host has to answer at both. If the same configuration creates the host, apply that first, with `-target`, or from a configuration of its own.
 
 ## Connecting and retries
 
@@ -239,3 +306,66 @@ A new `port`, or an `ssh_config_file` that gives the host a new port or `HostNam
 - **Either address has no recorded key.** Conn3x can't tell, so the steps stay as they are. Connecting still checks the new address's key.
 
 A plan refreshes each step with the settings in state, so it tries the old port first. If sshd no longer listens there, the refresh gives up after 10 seconds with a `Host not reachable during refresh` warning, the steps keep what the last apply recorded, and the plan moves them to the new port.
+
+## Hosts behind SSM or IAP
+
+When port 22 is closed to the network, `proxy_command` can reach a host through its cloud's own tunnel instead. The SSH session still runs end to end, so host keys are checked as usual, and the agent, tunnels and network devices work as they do over TCP. The command uses its own credentials, the AWS or gcloud profile on the machine running Conn3x, and Conn3x never sees them.
+
+AWS Session Manager, with the host's instance ID as its address (it needs the AWS CLI and its Session Manager plugin):
+
+```hcl
+ssh {
+  user          = "ec2-user"
+  proxy_command = ["aws", "ssm", "start-session", "--target", "%h",
+    "--document-name", "AWS-StartSSHSession", "--parameters", "portNumber=%p"]
+}
+```
+
+Google Cloud IAP, with the instance name as its address:
+
+```hcl
+ssh {
+  user          = "deploy"
+  proxy_command = ["gcloud", "compute", "start-iap-tunnel", "%h", "%p",
+    "--listen-on-stdin", "--zone", "us-central1-a"]
+}
+```
+
+`ssh_config_file` reads `ProxyCommand` too, split into plain words and quotes. A line that needs a shell, with a pipe, `$` or a redirection, is refused, and so is a host that sets both `ProxyCommand` and `ProxyJump`. Closing the connection ends the command and anything it started, such as the Session Manager plugin.
+
+Both have been tested end to end: Amazon Linux 2023 behind Session Manager with no inbound rules, and Debian 12 behind IAP with no external IP. Record the host key first, as you would for any host: `ssh -o ProxyCommand="..." user@i-0abc123 true` with the same command adds it to your known_hosts under the instance ID or name.
+
+[`conn3x run`](/reference/cli/run#hosts) reaches these hosts too, from `-circuits` or from `ansible_ssh_common_args` in an inventory.
+
+## Containers instead of SSH
+
+A host that's a container doesn't need sshd. Name the container, and Conn3x runs each command with `podman exec -i`, `docker exec -i` or `kubectl exec -i` on the machine Conn3x runs on, so there are no keys and no known_hosts file to set up. It suits testing a circuit against throwaway containers, and configuring containers you already run. Experimental, since v0.23.0.
+
+```hcl
+circuit "web" {
+  hosts = {
+    web1 = { address = "web1", container = "web1" }
+    web2 = { address = "web2", container = "web2" }
+  }
+
+  ssh {
+    container_engine = "podman"
+  }
+
+  step "motd" {
+    file {
+      path    = "/etc/motd"
+      content = "Hello from ${each.key}\n"
+    }
+  }
+}
+```
+
+`address` names the host in plans and messages; Conn3x doesn't connect to it.
+
+- **User.** With podman and docker, `user` runs commands as that user (`--user`), and `become = true` runs them as root. Otherwise they run as the container's default user. `kubectl exec` can't choose a user, so setting either one with `kubectl` is an error.
+- **kubectl.** `container` is the pod's name, and the command runs in the pod's default container. Set `kube_namespace` and `kube_context` as needed. Conn3x uses whatever kubeconfig `kubectl` finds.
+- **What needs SSH.** Windows and network device steps, `ssh_tunnel`, `confirm_after` and the [agent](/reference/glossary#agent) need an SSH connection, and say so when the host is a container. Everything else, packages, files, users and services included, works the same.
+- **Failures.** A container that isn't running, a user it doesn't have, or a pod that isn't there is an error naming the container, never read as a command's exit status.
+
+The other SSH settings, such as `port`, `private_key_file` and `jump_hosts`, aren't read for a container.

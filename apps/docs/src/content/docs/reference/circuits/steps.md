@@ -1,6 +1,6 @@
 ---
 title: Steps
-description: The step block, the order steps run in, implicit and explicit dependencies, depends_on, for_each with item.key and item.value, and instance keys for repeated steps.
+description: "The step block, the order steps run in, implicit and explicit dependencies, depends_on, for_each with item.key and item.value, instance keys for repeated steps, import for adopting what a host already has, and lifecycle: prevent_destroy, ignore_changes, create_before_destroy, replace_triggered_by and conditions."
 ---
 
 A step applies one module, such as a package, a file or a service, to every host in the circuit.
@@ -29,11 +29,19 @@ circuit "web" {
 ```text
 step "NAME" {
   for_each   = EXPRESSION        # optional
+  when       = EXPRESSION        # optional
+  run_once   = true | false      # optional
+  on         = HOST              # optional
   depends_on = [ADDRESS, ...]    # optional
   notify     = [handler.NAME, ...] # optional
+  import     = true | [HOST, ...] # optional
 
   MODULE {
     ARGUMENT = EXPRESSION
+    ...
+  }
+
+  lifecycle {                    # optional
     ...
   }
 }
@@ -45,10 +53,15 @@ A step block takes one label, the step's name, and contains:
 | --- | --- | --- |
 | Module block | Yes | Exactly one module block, such as `package`, `file` or `service`. The [module reference](/modules/file) lists every module and its arguments. |
 | `for_each` | No | Repeat the step for each item of a map, or of a list or set of strings, on every host. See [for_each](#for_each). |
+| `when` | No | A condition, true or false for each host, that picks the hosts the step runs on. See [when](#when). |
+| `run_once` | No | `true` to run the step on one host only, such as for a database migration. See [run_once](#run_once). |
+| `on` | No | The host to run on. With `run_once`, it picks the one host. Without it, every host's step runs on this host instead, as Ansible's `delegate_to` does. See [on](#on). |
 | `depends_on` | No | A list of resources the step waits for, in addition to the step before it. See [depends_on](#depends_on). |
 | `notify` | No | A list of handlers in the same circuit to run when this step changes something on a host. See [Handlers](/reference/circuits/handlers). |
+| `import` | No | `true`, or a list of host names, to adopt the object already on those hosts instead of creating it. See [import](#import). |
+| `lifecycle` | No | One block that protects the step from removal, ignores changes made elsewhere, or checks conditions. See [lifecycle](#lifecycle). |
 
-A step accepts nothing else. The resource meta-arguments `count`, `lifecycle`, `provider`, `provisioner` and `connection` aren't available in a step.
+A step accepts nothing else. The resource meta-arguments `count`, `provider`, `provisioner` and `connection` aren't available in a step.
 
 ## Modules
 
@@ -58,9 +71,9 @@ Each has its own page under [Modules](/modules/file), with its arguments and the
 
 ## Order
 
-Steps run in the order they are written. Each step depends on the whole step before it, so a step starts on a host only after the step before it has finished on every host.
+Steps run in the order they are written. By default each step depends on the whole step before it, so a step starts on a host only after the step before it has finished on every host. A circuit can [chain its steps per host](#per-host) instead.
 
-Within one step, Conn3x works on several hosts at once, up to the `-parallelism` limit of `plan` and `apply`, which defaults to 10.
+Within one step, Conn3x works on several hosts at once, up to the `-parallelism` limit of `plan` and `apply`, which defaults to 50.
 
 ```hcl
 circuit "web" {
@@ -93,6 +106,57 @@ circuit "web" {
 ```
 
 There is no order between circuits. Two circuits in the same configuration run independently unless one refers to the other or uses `depends_on`.
+
+### Per host
+
+:::note
+Circuits take `strategy` since v0.9.0. Earlier releases reject it with "Unsupported argument".
+:::
+
+In lockstep, the slowest host sets the pace. If `web5` takes three minutes over a package that `web1` installs in thirty seconds, `web1` waits out the difference at that step, and again at the next slow one. Set `strategy = "per_host"` on the circuit and each host runs its own chain: `web1` moves on to its next step as soon as its own previous step is done.
+
+```hcl
+circuit "web" {
+  hosts    = local.web_servers
+  strategy = "per_host"
+
+  ssh {
+    user   = "deploy"
+    become = true
+  }
+
+  step "nginx" {
+    package {
+      name = "nginx"
+    }
+  }
+
+  # Starts on each host once nginx is installed on that host.
+  step "running" {
+    service {
+      name    = "nginx"
+      state   = "started"
+      enabled = true
+    }
+  }
+}
+```
+
+| `strategy` | A step starts on a host when | A step fails on one host |
+| --- | --- | --- |
+| `"lockstep"` (default) | the step before it has finished on every host | no host starts the next step |
+| `"per_host"` | the step before it has finished on that host | that host's later steps and handlers don't run; the other hosts carry on to the end |
+
+Either way, an apply with a failed step exits with an error, and the next apply picks up where each host stopped. `strategy` must be a literal string.
+
+What stays the same with `"per_host"`:
+
+- On one host, steps still run one at a time, in the order written. A step with `for_each` finishes all of that host's items before the host's next step starts.
+- A dependency you write yourself keeps its whole-resource meaning. A step that reads `conn3x_command.web__token["web1"].stdout`, or has `depends_on = [conn3x_file.db__conf]`, still waits for that step on every host it names.
+- The `-parallelism` limit still caps how many operations run at once. When slots are scarce, a free one can go to a slow step on a host that hasn't started yet instead of the next step of a host that has, so `per_host` gains little. In a 12-host test, 11 hosts finished while the slowest was still busy at `-parallelism=10`, and none did at `-parallelism=4`. Set `-parallelism` close to the number of hosts to get the most from it.
+- Plans, state and resource addresses don't change, so you can switch strategy at any time. Plan, refresh and removal still go step by step across every host; only apply runs per host.
+
+Use lockstep when a step on one host needs an earlier step finished on every other host and no reference says so, such as a cluster join that expects every node to be installed first. Better still, make that dependency explicit with `depends_on`, and the circuit can run per host.
 
 ## Dependencies
 
@@ -254,6 +318,496 @@ conn3x_package.web__tools["web2/tree"]
 Remove an item from `for_each`, and the next plan destroys that item's instances on every host and leaves the other items alone. What happens on the host depends on the module's [`on_remove`](/reference/circuits/removal).
 
 A handler notified by a step with `for_each` runs on a host when any of that host's items changed.
+
+## when
+
+:::note
+`when` is in Conn3x since v0.10.0. Earlier releases reject it with "Unsupported argument in step".
+:::
+
+`when` runs a step only on the hosts where a condition is true, as Ansible's `when` does:
+
+```hcl
+data "conn3x_host" "facts" {
+  for_each = local.hosts
+  ssh {
+    host = each.value
+  }
+}
+
+circuit "web" {
+  hosts = local.hosts
+
+  step "apt_cache" {
+    when = data.conn3x_host.facts[each.key].os_family == "debian"
+    command {
+      command = "apt-get update"
+    }
+  }
+}
+```
+
+`each.key` and `each.value` are the host, as in the module's arguments. In a step with [`for_each`](#for_each), `when` is evaluated for each host and item, and can read `item.key` and `item.value` too:
+
+```hcl
+step "tools" {
+  for_each = ["git", "jq", "podman"]
+  when     = item.value != "podman" || local.family[each.key] == "redhat"
+  package {
+    name = item.value
+  }
+}
+```
+
+A few rules:
+
+- **It has to be known when planning,** because it decides which instances of the step exist. A fact from [`conn3x_host`](/reference/host-facts) is known for a host that already exists, but not for one the same plan creates. For those, give the host's entry the value `when` needs and read that first, as in `try(each.value.os, data.conn3x_host.facts[each.key].os_id)`. An unknown `when` fails the plan with a message saying so.
+- **It must be `true` or `false`.** Anything else is an error that names the host.
+- **On `import`:** `import = true` adopts the object only on the hosts `when` keeps. Listing a host that `when` leaves out is an error.
+- **Under [`strategy = "per_host"`](#per-host),** a step that `when` skips on a host doesn't break that host's chain: the next step waits for the last step that does run there.
+- **Handlers:** a host the step skipped has nothing to notify from it. Handlers don't take `when`. See [Handlers](/reference/circuits/handlers#when-handlers-run).
+
+### When it turns false
+
+`when` doesn't skip a step the way Ansible's does. It decides whether the step has an instance on a host. So when `when` goes from true to false on a host that already has the step, the next plan **removes** that instance, as removing the host from `hosts` would:
+
+```text
+# conn3x_file.web__apt_conf["web2"] will be destroyed
+# (because key ["web2"] is not in for_each map)
+```
+
+What happens on the host is the module's [`on_remove`](/reference/circuits/removal). With the default, `forget`, Conn3x stops managing the object and leaves it there. With `on_remove = "delete"`, it deletes it. So a file a step wrote stays put after `when` turns false, unless that step sets `on_remove = "delete"`. Turn `when` back to true and the next apply manages it again.
+
+## run_once
+
+:::note
+`run_once` and `on` are in Conn3x since v0.10.0. Earlier releases reject them with "Unsupported argument in step".
+:::
+
+`run_once = true` runs a step on one host only, as Ansible's `run_once` does. It's for things that happen once per circuit, not once per host: a database migration, a cluster bootstrap, a cache flush.
+
+```hcl
+step "code" {
+  ...
+}
+
+step "migrate" {
+  run_once = true
+  on       = "db1"
+  command {
+    command = "app migrate"
+  }
+}
+
+step "restart" {
+  ...
+}
+```
+
+- **Which host:** the one `on` names, or else the first host key in sort order. HCL maps don't keep the order they're written in, so "first" means sorted: in `{ web2 = ..., db1 = ..., web1 = ... }` it's `db1`. `on` names one of the circuit's `hosts` keys and has to be known when planning. A name that isn't in `hosts` is an error. Set `on` for anything that shouldn't move. Without `run_once`, `on` means something else: see [on](#on).
+- **The plan shows one instance:** `conn3x_command.app__migrate["db1"]`. In a step with [`for_each`](#for_each), it's that host's items.
+- **It waits for every host, even under [`strategy = "per_host"`](#per-host).** The steps before it finish on every host before it starts, and the steps after it start on any host only once it has finished. So `migrate` above never runs while a host is still on the old code, and `restart` never runs before the migration. Under `per_host` that makes a `run_once` step the one point where hosts wait for each other.
+- **Changing the host is a removal:** if `on` changes, or the first host changes because one was added or removed, the old instance is removed, with its [`on_remove`](/reference/circuits/removal), and the new host gets the step.
+- **What doesn't go with it:** `run_once` with [`when`](#when) is an error for now, since it isn't settled whether `when` should pick the host or decide whether the one host runs it. So is `import` naming a host other than the one it runs on, since the step has nothing to adopt there.
+
+### Handlers
+
+A handler notified by a `run_once` step runs only on the host where the step ran, as in Ansible. That's a trap in the most common use, "migrate once, then restart everywhere":
+
+```hcl
+step "migrate" {
+  run_once = true
+  notify   = [handler.restart]   # restarts db1 only
+  ...
+}
+```
+
+To restart every host, give the restart its own step after the `run_once` one, or notify the handler from a step that runs on every host.
+
+## on
+
+:::note
+`on` without `run_once` is in Conn3x since v0.15.0. Earlier releases reject it.
+:::
+
+`on = "lb"` runs each host's step on `lb`, as Ansible's `delegate_to` does. Use it when the work for a host happens somewhere else: taking it out of a load balancer before it's changed, or adding it to a monitoring server.
+
+```hcl
+circuit "app" {
+  hosts = {
+    web1 = "203.0.113.11"
+    web2 = "203.0.113.12"
+    lb   = { address = "203.0.113.5", user = "admin" }
+  }
+
+  ssh {
+    user = "deploy"
+  }
+
+  step "drain" {
+    on = "lb"
+    command {
+      command = "lb-ctl drain ${each.key}"
+      ...
+    }
+  }
+
+  ...
+}
+```
+
+- **Each host keeps its own instance.** The plan shows `conn3x_command.app__drain["web1"]` and `["web2"]`, in each host's chain of steps, so ordering and [`strategy`](#per-host) work as they do for any step.
+- **`each` still means that host.** Above, `${each.key}` is `web1` in `web1`'s instance, though the command runs on `lb`.
+- **The connection is `lb`'s.** The step logs in at `lb`'s address, with any settings `lb`'s host object overrides, such as `user = "admin"`, and the circuit's `ssh` block for the rest.
+- **`on` names a key of `hosts`.** So the host it names is one the circuit configures too, and it gets its own instance of the step: above, `lb` runs `lb-ctl drain lb`.
+- **Not with `each` in the `ssh` block.** There `each` would still mean the host the step is for, not the host it runs on, so a circuit whose `ssh` block uses `each` can't delegate. Put the per-host setting in the host object instead.
+
+With [`run_once = true`](#run_once), `on` picks the one host the step runs on, and there's one instance in the plan, not one per host.
+
+### On the controller
+
+:::note
+`on = "controller"` is in Conn3x since v0.16.0. Earlier releases reject it.
+:::
+
+`on = "controller"` runs each host's step on the machine you run Conn3x on, as Ansible's `delegate_to: localhost` does. Reach for it when the work for a host is a call from your side: an API request, a DNS update, a ticket.
+
+```hcl
+step "register" {
+  on = "controller"
+  command {
+    command = "curl -fsS -X POST https://inventory.internal/hosts/${each.key}"
+    unless  = "curl -fsS https://inventory.internal/hosts/${each.key}"
+  }
+}
+```
+
+- **Only `command` steps,** for now. Any other module with `on = "controller"` is an error at validate.
+- **Once per host.** As with any `on`, each host keeps its own instance, `each.key` is that host, and the step sits in that host's chain.
+- **It runs as you.** The command runs with `/bin/sh -c`, as whoever runs Conn3x, in Conn3x's working directory and with its environment. Nothing from the circuit's `ssh` block applies, `become` included, so it never runs with sudo. It needs `/bin/sh`, so Conn3x on Windows can't run it.
+- **`controller` always means your machine.** A host in `hosts` named `controller` can't be reached with `on`.
+
+## import
+
+:::note
+Steps take `import` since v0.8.0. Earlier releases reject it with "Unsupported argument in step".
+:::
+
+`import` adopts what's already on a host into state, so Conn3x manages it from then on without creating it first:
+
+```hcl
+step "nginx" {
+  import = true            # every host in the circuit
+  package {
+    name = "nginx"
+  }
+}
+
+step "motd" {
+  import = ["web1"]        # only web1; other hosts get a new file
+  file {
+    path    = "/etc/motd"
+    content = "Managed by Conn3x\n"
+  }
+}
+```
+
+| Value | What it does |
+| --- | --- |
+| `true` | Adopts the step on every host. |
+| A list of host names | Adopts it on those hosts only. In a step with `for_each`, a host name covers every item on that host, and an instance key such as `"web1/tree"` picks one. A name that isn't in `hosts` is an error. |
+| `false` | The same as leaving `import` out. |
+
+The first plan reads each host. Where the host already matches the step, the plan says `will be imported`. Where it doesn't, it says `will be updated in-place` and shows the diff, which apply then makes. Once a step is in state, its import does nothing, so it's safe to leave in.
+
+An import says the object exists. When a listed host doesn't have it, the plan fails rather than creating it:
+
+```text
+Error: Nothing to import on box
+
+The step imports file /etc/app.conf on box, but box doesn't have it, so
+there's nothing to adopt. Remove box from the step's import, or set import to
+the hosts that already have it; Conn3x then creates it on the rest.
+```
+
+These modules can import: `authorized_key`, `cron`, `directory`, `file`, `firewalld`, `group`, `hostname`, `link`, `locale`, `mount`, `package`, `repository`, `selinux_boolean`, `selinux_fcontext`, `service`, `sysctl`, `template`, `timer`, `timezone`, `ufw` and `user`. All but the first eight arrived in v0.9.0.
+
+Twenty-one Windows modules can too. Since v0.10.0: `windows_directory`, `windows_feature`, `windows_file`, `windows_group`, `windows_registry_value`, `windows_service` and `windows_user`. Since v0.11.0: `windows_package`. Since v0.15.0: `windows_firewall_rule`, `windows_scheduled_task`, `windows_iis_app_pool`, `windows_iis_site`, `windows_acl`, `windows_dns_client`, `windows_ad_ou`, `windows_ad_group` and `windows_ad_user`. Since v0.16.0: `windows_ad_forest`, `windows_ad_domain`, `windows_ad_domain_controller` and `windows_domain_membership`, which adopt a host that's already that forest's or domain's controller, or already a member, with no password needed. Any other module rejects `import`.
+
+A Windows step's import ID also carries its module's blocks, such as a scheduled task's triggers or a site's bindings, so the first plan after an import compares them instead of rewriting them.
+
+A few details:
+
+- Each step lowers to an OpenTofu [`import` block](https://opentofu.org/docs/language/import/), so `import` works in the root configuration only, as in OpenTofu. For a circuit you call as a module, see [a step inside a module](#a-step-inside-a-module).
+- The import ID is JSON with the step's arguments and ssh settings, and the plan prints it once in an `imported from` line. It names your key and known_hosts files by path; it never holds a key, and never a file's content.
+- A write-only file (`content_wo`, or a template with `write_only = true`) is imported as an HMAC of what's on the host. The content stays out of state.
+- Arguments ending in `_wo`, such as a `windows_user` step's `password_wo`, never go into an import ID.
+- Windows reads compare hashes, not content. A `windows_file` import is the exception: it reads the file's text once, so the first plan can compare it with the step and show a diff.
+- A `service` step that sets `state` or `enabled` takes both from the host, so a stopped unit plans `state = "stopped" -> "started"`.
+- To adopt exactly what's there and change nothing on the first apply, add `lifecycle { ignore_changes = all }`, then remove it.
+
+### A step inside a module
+
+:::note
+`provider::conn3x::import_id` is in Conn3x since v0.9.0. Earlier releases don't have it.
+:::
+
+A step's own `import` can't reach into a module, so to adopt what an official circuit, or any circuit you call through a `module` block, manages on a server you already run, write the `import` block in your root configuration and build its ID with `provider::conn3x::import_id`:
+
+```hcl
+terraform {
+  required_providers {
+    conn3x = { source = "terraform.io/builtin/conn3x" }
+  }
+}
+
+import {
+  for_each = local.hosts
+  to       = module.site.conn3x_file.site__motd[each.key]
+  id = provider::conn3x::import_id(each.key, merge(local.ssh, { host = each.value }), {
+    path = "/etc/motd"
+    mode = "0644"
+  })
+}
+```
+
+| Argument | What to pass |
+| --- | --- |
+| `key` | The host's key in the circuit's `hosts`, such as `web1`. |
+| `ssh` | The circuit's `ssh` settings as an object, with the host's address as `host`. |
+| `args` | The step's module arguments as the circuit sets them. `content`, `content_wo` and `validate` are left out of the ID; `content_wo` marks the file write-only. |
+
+`to` is the step's address in the module: `module.<name>.<resource type>.<circuit>__<step>[<host>]`, the same address `conn3x state list` shows once it's in state. The function returns the same ID a step's `import = true` would write, so the plan, the missing-object error and the write-only handling are all as above.
+
+OpenTofu looks up every provider function's provider in `required_providers`, so the module that calls `import_id` lists `conn3x`, even though it's built in. Without it, the plan fails with "Provider "conn3x" does not exist within the required_providers of this module".
+
+The ID is JSON, which `import_id` writes so you don't have to:
+
+```json
+{"args":{"mode":"0644","path":"/etc/motd"},"key":"web1","ssh":{"host":"203.0.113.10","user":"root"},"v":1}
+```
+
+`v` is the format's version, and `write_only` is `true` for a write-only file. Nulls are left out of `ssh` and `args`.
+
+`conn3x import` takes the same ID on the command line. To adopt the `/etc/motd` a host already has into a `file` step that doesn't set `import`:
+
+```sh
+conn3x import 'conn3x_file.site__motd["web1"]' \
+  '{"v":1,"key":"web1","ssh":{"host":"203.0.113.10","port":22,"user":"root"},"args":{"path":"/etc/motd","mode":"0644"}}'
+```
+
+`port` is a number, and `args` are the step's own arguments, as for `import_id`. Pass every argument the step sets. The ones that name what's imported are:
+
+| Module | Names it |
+| --- | --- |
+| `file`, `directory`, `link`, `mount`, `windows_file`, `windows_directory`, `windows_acl` | `path` |
+| `package`, `service`, `user`, `group`, `cron`, `timer`, `sysctl`, `repository`, `postgresql_database`, `postgresql_role`, `mysql_database`, `windows_service`, `windows_feature`, `windows_user`, `windows_group`, `windows_firewall_rule`, `windows_iis_app_pool`, `windows_iis_site`, `windows_ad_group`, `windows_ad_user` | `name` |
+| `authorized_key` | `user` and `key` |
+| `mysql_user` | `name` and `host` |
+| `windows_registry_value` | `key` and `name` |
+| `windows_package` | `product_code` |
+| `windows_scheduled_task` | `path` and `name` |
+| `windows_dns_client` | `interface` |
+| `windows_ad_ou` | `name` and `path` |
+| `windows_ad_forest`, `windows_ad_domain`, `windows_ad_domain_controller` | `domain_name` |
+| `windows_domain_membership` | `domain` |
+| `firewalld` | `zone`, `service` and `port` |
+| `ufw` | `action`, `port` and `from` |
+| `selinux_boolean` | `name` |
+| `selinux_fcontext` | `target` |
+| `hostname`, `timezone`, `locale` | nothing: a host always has one |
+
+[Adopt servers you already run](/guides/adopt-servers) walks through a whole server.
+
+## lifecycle
+
+:::note
+Steps take a `lifecycle` block since v0.8.0. Earlier releases reject it with "Unsupported block in step".
+:::
+
+A step's `lifecycle` block works like [OpenTofu's](https://opentofu.org/docs/language/meta-arguments/lifecycle/), with the same arguments, checks and messages, because Conn3x hands it to OpenTofu's own decoder. It sits beside the module block:
+
+```hcl
+circuit "try" {
+  hosts = { box = "127.0.0.1" }
+
+  ssh {
+    port             = 2222
+    user             = "root"
+    private_key_file = "./id_ed25519"
+    known_hosts_file = "./known_hosts"
+  }
+
+  step "motd" {
+    file {
+      path    = "/etc/motd"
+      content = "Hello from ${each.key}, set up by Conn3x.\n"
+    }
+
+    lifecycle {
+      ignore_changes  = [content]
+      prevent_destroy = true
+
+      precondition {
+        condition     = each.key != "db1"
+        error_message = "The motd circuit doesn't run on database hosts, and ${each.key} is one."
+      }
+    }
+  }
+}
+```
+
+That's the [try-it-locally](/tutorials/try-locally) circuit with one step. Each example below ran against its container.
+
+| Argument | What it does in a step |
+| --- | --- |
+| `prevent_destroy` | Fails any plan that would remove the step from a host. |
+| `ignore_changes` | A list of the module's arguments, or `all`. Changes to them, on the host or in the config, don't show in the plan. |
+| `create_before_destroy` | Adds the new object before removing the old one when the step is replaced. Only some modules take it; see [create_before_destroy](#create_before_destroy). |
+| `replace_triggered_by` | A list of resource addresses. When one of them changes, the step is replaced. |
+| `precondition` | A block with `condition` and `error_message`, checked before the step is planned. |
+| `postcondition` | The same, checked against the planned and applied step, which is `self`. |
+
+A step takes one `lifecycle` block. `enabled` and `destroy` aren't available in a step:
+
+- For `enabled`, a step already repeats over its hosts, and OpenTofu doesn't allow `enabled` beside `for_each`. Filter `hosts` to run a step on fewer hosts, or give the step an empty `for_each` to run it nowhere.
+- For `destroy`, the module's [`on_remove`](/reference/circuits/removal) already says what removal does. `on_remove = "forget"` leaves the object on the host.
+
+### prevent_destroy
+
+A bad variable that empties `hosts` would remove every step from every host. With `prevent_destroy = true`, the plan stops instead:
+
+```text
+$ conn3x plan
+Error: Resource instance cannot be destroyed
+
+  on main.circuit.hcl line 11, in circuit "try":
+  11:   step "motd" {
+
+Resource instance conn3x_file.try__motd["box"] has prevent_destroy set, but
+the plan calls for it to be destroyed.
+```
+
+`on_remove = "forget"` doesn't make this unnecessary. Forget keeps the file on the host, but the step still leaves state, and the next apply no longer manages it. `prevent_destroy` stops that from happening by accident.
+
+It can come from a variable, so the same circuit can protect production and let a test environment go:
+
+```hcl
+lifecycle {
+  prevent_destroy = var.protect
+}
+```
+
+With `protect = true` a destroy stops as above and the host keeps the file; with `protect = false` it goes ahead.
+
+### ignore_changes
+
+`ignore_changes` names the module's own arguments, such as `content`, `mode` or `shell`, as listed on each [module page](/modules/file). The `ssh` block can be ignored as a whole. With `ignore_changes = [content]` above, someone edits the file on the host and the plan leaves it alone:
+
+```text
+$ ssh -p 2222 -i id_ed25519 -o UserKnownHostsFile=known_hosts root@127.0.0.1 'echo "Back at 14:00. -- Sam" > /etc/motd'
+$ conn3x plan
+conn3x_file.try__motd["box"]: Refreshing state... [id=127.0.0.1:2222:/etc/motd]
+
+No changes. Your infrastructure matches the configuration.
+```
+
+An ignored argument also stays as it is when another argument of the same step changes. A `user` step with `ignore_changes = [shell]` adds the user to a new group without resetting a shell someone changed by hand.
+
+In a `template` step, name the template's arguments: `source` and `vars` mean the rendered `content`, and `destination` means `path`. Write-only arguments, such as `content_wo` and `validate`, can't be ignored.
+
+A name the module doesn't have is an error when you validate:
+
+```text
+Error: Unsupported attribute
+
+  on main.circuit.hcl line 18, in circuit "try":
+  18:       ignore_changes = [colour]
+
+This object has no argument, nested block, or exported attribute named
+"colour".
+```
+
+### create_before_destroy
+
+When a step's change replaces it, Conn3x removes the old object and then adds the new one. For a firewall rule, that closes the old port before the new rule is added. `create_before_destroy = true` turns the order around, so a key rotation adds the new key before the old one goes:
+
+```hcl
+step "deploy_key" {
+  authorized_key {
+    user = "deploy"
+    key  = var.deploy_key
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+```
+
+It works on the modules whose replacement is always a different object on the host: `authorized_key`, `cron`, `firewalld`, `repository`, `timer`, `ufw`, `windows_firewall_rule`, `windows_iis_app_pool`, `windows_iis_site` and `windows_scheduled_task`. On any other module, a replacement can land on the same file, package or user, and removing the old one would delete what was just made, so Conn3x refuses it:
+
+```text
+Error: create_before_destroy isn't available on a file step
+
+  on main.circuit.hcl line 18, in circuit "try":
+  18:       create_before_destroy = true
+
+Replacing a file step can land on the same object on the host, and the old
+object's removal would then delete what was just created, so
+create_before_destroy has nothing to keep. It works on steps whose
+replacement is always a different object: authorized_key, cron, firewalld,
+repository, timer, ufw, windows_firewall_rule, windows_iis_app_pool,
+windows_iis_site, windows_scheduled_task.
+```
+
+`create_before_destroy = false` is accepted on every module. OpenTofu also turns `create_before_destroy` on for everything a step with it depends on, which includes every earlier step in the circuit, when one of those is replaced.
+
+### replace_triggered_by
+
+`replace_triggered_by` takes resource addresses, as `depends_on` does. To name a step, use its resource address, such as `conn3x_file.web__conf`; `step.conf` isn't valid. In a step without `for_each`, `[each.key]` picks the same host's instance. In a step with `for_each`, name whole resources only: OpenTofu allows only `each.key` there, and in that step it would be the `"HOST/ITEM"` key, so `each` and `item` are an error.
+
+### precondition and postcondition
+
+Conditions see the same names as the module block: `each.key` and `each.value` are the host, and in a step with `for_each`, `item.key` and `item.value` are the item. A postcondition can also read the step's attributes through `self`. A failed precondition stops the plan before anything runs on the host:
+
+```text
+$ conn3x plan
+Error: Resource precondition failed
+
+  on main.circuit.hcl line 22, in circuit "try":
+  22:         condition     = each.key != "db1"
+    ├────────────────
+    │ each.key is "db1"
+
+The motd circuit doesn't run on database hosts, and db1 is one.
+```
+
+A postcondition is checked against the plan when the values are known then, and again after apply:
+
+```hcl
+lifecycle {
+  postcondition {
+    condition     = self.mode == "0600"
+    error_message = "/etc/motd on ${each.key} is ${self.mode}, not 0600."
+  }
+}
+```
+
+```text
+$ conn3x plan
+Error: Resource postcondition failed
+
+  on main.circuit.hcl line 20, in circuit "try":
+  20:         condition     = self.mode == "0600"
+    ├────────────────
+    │ self.mode is "0644"
+    ├────────────────
+    │ Diff:
+    │     "0644" -> "0600"
+
+/etc/motd on box is 0644, not 0600.
+```
 
 ## Warnings
 

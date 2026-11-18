@@ -31,8 +31,8 @@ A script reads each circuit when the site builds. It looks at the latest `vX.Y.Z
 | Check | Group | Points | Must pass | Reads |
 |-------|-------|--------|-----------|-------|
 | CI isn't staying red on main | Testing | 15 | Yes | The two latest finished `CI` runs from pushes to main. A latest run that failed after a re-run fails, whatever came before it. So do two latest runs that both failed. A lone failure, with a passing run before it or no run before it, fails once it's more than 3 days old when grades are read. Until then it passes, so one flaky run has time to be re-run or followed by a push |
-| Applied on real distributions in CI | Testing | 10 | | Distribution names in a job that runs `conn3x apply`. A quarter of the points each, up to four. A Windows circuit is read by its runners, `windows-2022` and `windows-2025`, and earns half the points for each, since those are the two releases Conn3x supports |
-| A second plan comes back clean | Testing | 15 | Yes | `conn3x plan -detailed-exitcode` after an apply, not followed by `\|\| true` |
+| Applied on real distributions in CI | Testing | 10 | | Distribution names in a job that runs `conn3x apply`. A quarter of the points each, up to four. A Windows circuit is read by its runners, `windows-2022` and `windows-2025`, and earns half the points for each, since those are the two releases Conn3x supports. Doesn't apply to a circuit that configures no host: one whose `.hcl` and `.tf` files, outside `examples/` and `test/`, have no `conn3x_host`, no `circuit` block and no `module` block, only provider resources, such as a circuit that sets up a router through its API |
+| A second plan comes back clean | Testing | 15 | Yes | `conn3x plan -detailed-exitcode` after an apply, not followed by `\|\| true`, or `conn3x test` with a run that applies and sets `idempotent = true` |
 | CI uses the thing, past "service is active" | Testing | 20 | Yes | A command after apply, in the workflow or a script it calls, that does more than look at the host |
 | CI checks secrets stay out of state | Testing | 10 | | A CI line that fails on finding a value in state. Applies if a variable is `sensitive` or `ephemeral` |
 | Restart or reboot tested | Testing | 5 | | A `restart` or `reboot` after apply. Applies if the circuit runs a service |
@@ -70,10 +70,11 @@ These checks read files and API responses. They don't run the circuit or review 
 - **The checksum check only reads `download` steps and `windows_package` steps with a `url`.** A fetch made another way isn't seen.
 - **The privileged shell check can't see who owns a directory.** Root following a symbolic link planted by a service account is the bug that matters most here, and it can't be read from text, since the same `chown` is safe in a directory only root can change. A pass means none of the listed patterns turned up. It doesn't mean the circuit's root steps are safe. It's worth 5 points, like the other supply chain checks, because nearly every circuit passes it and it can't see that bug.
 - **The listen address check reads text.** A service that listens on every address because its own default says so, with nothing in the circuit about it, isn't seen. A fail isn't always a mistake either: a DNS server is meant to answer on every address. The page shows the line it found.
+- **A circuit can say why a finding is intended.** The image digest, listen address and privileged shell checks skip a line that [`conn3x lint`](/reference/cli/lint) would skip: one with a `# conn3x-lint:ignore C3X00N <reason>` comment on it or on the line above. The reason is required, and the ignore counts from the circuit's next tagged release, since grades read the latest tag.
 - **The image check only knows the registries it lists.** An image from another registry, or a short name such as `alpine:3`, isn't seen.
 - **Key expiry doesn't check signatures or revocations.** It reads the dates.
 - **CI on main can differ from the tag.** The CI file is read at the tag, and the run comes from main.
-- **Real-host and upgrade checks are hard to earn today.** No circuit has either yet. That's the honest state of things, so we count them.
+- **Real-host checks are hard to earn today.** No circuit has one yet, and upgrade tests only started arriving in November 2026. That's the honest state of things, so we count them.
 
 If the GitHub API fails during a build, a circuit keeps its last good result. The date on its page is the date the result was read, so an old date means an old reading.
 

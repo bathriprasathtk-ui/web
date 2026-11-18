@@ -158,9 +158,11 @@ This narrows the window rather than closing it: the service could die between th
 
 ## Test it on a container
 
-Before you tag a version, apply your circuit to a fresh host and run `conn3x plan` again. The second plan has to say `No changes.` If it doesn't, a step is reporting a change it didn't make, or making one it didn't plan.
+Before you tag a version, apply your circuit to a fresh host and run `conn3x plan` again. The second plan has to say `No changes.` If it doesn't, a step is reporting a change it didn't make, or making one it didn't plan. Since v0.12.0 a test can make that check for you: set [`idempotent = true`](/guides/test-a-circuit#check-that-a-second-plan-is-empty) on a run that applies.
 
 The [try-it-locally example](https://github.com/conn3xorg/conn3x/tree/main/examples/try-it-locally) starts a Rocky Linux 10 container with SSH that you can point an `examples/local` configuration at. The official circuits do the same in CI on Rocky Linux 10, Fedora 45, Ubuntu 24.04 and Debian 13, with `conn3x plan -detailed-exitcode` failing the job when the second plan isn't empty. Copy their workflow if you like.
+
+An empty second plan says the circuit settles. It doesn't say the host ended up as you meant. For that, write tests: `conn3x test` asserts on what each step plans, with no server, and on what it applied to a container. [Test a circuit](/guides/test-a-circuit) shows both.
 
 A container isn't a whole server, so some steps need more from it. firewalld and ufw need the `NET_ADMIN` and `NET_RAW` capabilities, so start the container with `--cap-add NET_ADMIN,NET_RAW`. `sysctl` writes to `/proc/sys`, which a container can only change when it runs with `--privileged`. Minimal images may also leave out `tzdata`, which `timezone` needs; install it in an earlier step.
 

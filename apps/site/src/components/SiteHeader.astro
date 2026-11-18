@@ -25,19 +25,8 @@ const links = [
 const [latest] = (await getCollection("blog", (p) => isPublished(p)))
   .sort((a, b) => b.data.date.valueOf() - a.data.date.valueOf());
 
-// Launch day on Product Hunt takes the bar from 00:00 PT on 6 Nov until the
-// next morning's 07:00 UTC rebuild. shortcut: a dated one-off, delete it and
-// the 6 Nov cron in deploy.yml after launch.
-const now = Date.now();
-const productHunt = now >= Date.parse("2026-11-06T08:00:00Z") && now < Date.parse("2026-11-07T07:00:00Z");
 ---
-{productHunt ? (
-  <a class="announce" href="https://www.producthunt.com/products/conn3x">
-    <span class="dot" aria-hidden="true"></span>
-    <span class="t">We're on Product Hunt today. Tell us what you think</span>
-    <span class="go" aria-hidden="true">→</span>
-  </a>
-) : latest && (
+{latest && (
   <a class="announce" href={`/blog/${latest.id}`}>
     <span class="dot" aria-hidden="true"></span>
     <span class="t">{latest.data.title}</span>
@@ -57,7 +46,7 @@ const productHunt = now >= Date.parse("2026-11-06T08:00:00Z") && now < Date.pars
         <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M8 .6l2.2 4.6 5 .7-3.6 3.5.9 5L8 12 3.5 14.4l.9-5L.8 5.9l5-.7z"/></svg>
         Star on GitHub
       </a>
-      <a class="btn start" href="https://docs.conn3x.org/get-started">Get started</a>
+      <a class="btn start" href="https://docs.conn3x.org/tutorials/try-locally">Try it locally</a>
       <details class="menu">
         <summary aria-label="Menu"><span></span><span></span></summary>
         <nav aria-label="Menu">

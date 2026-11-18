@@ -1,0 +1,67 @@
+{
+  "name": "conn3x-ui",
+  "version": "v0.1.7",
+  "hostObjects": true,
+  "inputs": [
+    {
+      "name": "conn3x_ui_version",
+      "type": "string",
+      "default": "0.3.0",
+      "description": "conn3x-ui release to install, without the leading v. Null means the default.",
+      "sensitive": false,
+      "ephemeral": false,
+      "required": false
+    },
+    {
+      "name": "conn3x_ui_checksums",
+      "type": "map(string)",
+      "default": {
+        "amd64": "3475d9c51fed001ffc678868457dd328254f4576c372d909d08cb35ce8b2c3e6",
+        "arm64": "a824c148c0a1dfb720447460f2940c8e4fc4d6a73148d8362ca05b38d02f06ea"
+      },
+      "description": "SHA-256 of the conn3x-ui release archive for each architecture, from the release's checksums.txt. Change these with conn3x_ui_version. Null means the default.",
+      "sensitive": false,
+      "ephemeral": false,
+      "required": false
+    },
+    {
+      "name": "conn3x_version",
+      "type": "string",
+      "default": "0.26.0",
+      "description": "Conn3x release the UI runs plans and applies with, without the leading v. A project can name another binary. Null means the default.",
+      "sensitive": false,
+      "ephemeral": false,
+      "required": false
+    },
+    {
+      "name": "conn3x_checksums",
+      "type": "map(string)",
+      "default": {
+        "amd64": "ffd9bc17ef5ada3e5877411f897835be0c555aadadcae64d3f32fcdcc6be9cc4",
+        "arm64": "13d1964821d666917d6741adce87e89bd0f376f033f86b51016412cb4a7d6c82"
+      },
+      "description": "SHA-256 of the conn3x release archive for each architecture, from the release's checksums.txt. Change these with conn3x_version. Null means the default.",
+      "sensitive": false,
+      "ephemeral": false,
+      "required": false
+    },
+    {
+      "name": "listen",
+      "type": "string",
+      "default": "127.0.0.1:8080",
+      "description": "Address the UI listens on. Keep it on loopback and put a TLS proxy in front to reach it from elsewhere: off localhost, the session cookie needs https.",
+      "sensitive": false,
+      "ephemeral": false,
+      "required": false
+    },
+    {
+      "name": "extra_args",
+      "type": "list(string)",
+      "default": [],
+      "description": "More flags for conn3x-ui serve, such as the -oidc-* ones for single sign-on. Each one is passed as a single argument, as written. Keep secrets out: use -oidc-client-secret-file.",
+      "sensitive": false,
+      "ephemeral": false,
+      "required": false
+    }
+  ]
+}

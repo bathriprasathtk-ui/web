@@ -31,7 +31,7 @@ variable "valkey_password" {
 }
 
 module "postgres" {
-  source = "github.com/conn3xorg/circuit-postgres?ref=v0.2.1"
+  source = "github.com/conn3xorg/circuit-postgres?ref=v0.3.0"
 
   hosts                = { secrets = "192.168.1.50" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -42,7 +42,7 @@ module "postgres" {
 }
 
 module "valkey" {
-  source = "github.com/conn3xorg/circuit-valkey?ref=v0.1.1"
+  source = "github.com/conn3xorg/circuit-valkey?ref=v0.2.0"
 
   hosts                = { secrets = "192.168.1.50" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -184,4 +184,4 @@ MPL-2.0. See [LICENSE](https://github.com/conn3xorg/circuit-infisical/blob/v0.1.
 
 - Repository: [conn3xorg/circuit-infisical](https://github.com/conn3xorg/circuit-infisical). This page covers [v0.1.1](https://github.com/conn3xorg/circuit-infisical/tree/v0.1.1); the repository's [tags](https://github.com/conn3xorg/circuit-infisical/tags) list every release.
 - Examples: [examples/local](https://github.com/conn3xorg/circuit-infisical/tree/v0.1.1/examples/local).
-- Related circuits: [PostgreSQL](/circuits/postgres), [Valkey](/circuits/valkey), [Caddy](/circuits/caddy), [Podman](/circuits/podman), [restic](/circuits/restic), [Users](/circuits/users), [LLDAP](/circuits/lldap), [OpenLDAP](/circuits/openldap), [FreeIPA](/circuits/freeipa), [Keycloak](/circuits/keycloak), [OpenBao](/circuits/openbao), [authentik](/circuits/authentik).
+- Related circuits: [PostgreSQL](/circuits/postgres), [Valkey](/circuits/valkey), [Caddy](/circuits/caddy), [Podman](/circuits/podman), [restic](/circuits/restic), [Users](/circuits/users), [Active Directory](/circuits/active-directory), [LLDAP](/circuits/lldap), [OpenLDAP](/circuits/openldap), [FreeIPA](/circuits/freeipa), [Keycloak](/circuits/keycloak), [OpenBao](/circuits/openbao), [authentik](/circuits/authentik), [Passbolt CE](/circuits/passbolt), [Teleport](/circuits/teleport).

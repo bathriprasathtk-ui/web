@@ -3,7 +3,7 @@ title: CLI overview
 description: How to run conn3x commands, the global options, the environment variables Conn3x reads, and its exit codes.
 ---
 
-The `conn3x` binary has every command OpenTofu 1.13.2 has, and two of its own: [`drift`](/reference/cli/drift) and [`convert ansible`](/reference/cli/convert-ansible). This section documents Conn3x v0.6.3.
+The `conn3x` binary has every command OpenTofu 1.13.2 has, and seven of its own: [`drift`](/reference/cli/drift), [`run`](/reference/cli/run), [`convert ansible`](/reference/cli/convert-ansible), [`generate step`](/reference/cli/generate-step), [`lint`](/reference/cli/lint), [`lsp`](/reference/cli/lsp) and [`mcp`](/reference/cli/mcp). This section documents Conn3x v0.10.0.
 
 ## Usage
 
@@ -42,7 +42,12 @@ These are the commands most people use. Each has its own page.
 | [`apply`](/reference/cli/apply) | Make the planned changes. |
 | [`destroy`](/reference/cli/destroy) | Remove everything the configuration manages. |
 | [`drift`](/reference/cli/drift) | Report what changed outside Conn3x since the last apply. Conn3x only. |
+| [`run`](/reference/cli/run) | Run one command or module on a group of hosts, without a circuit. Conn3x only. |
 | [`convert ansible`](/reference/cli/convert-ansible) | Turn an Ansible playbook into circuits. Conn3x only. |
+| [`generate step`](/reference/cli/generate-step) | Print a step for something a host already has. Conn3x only. |
+| [`lint`](/reference/cli/lint) | Check a circuit's own code for what the circuit grader marks down. Conn3x only. |
+| [`lsp`](/reference/cli/lsp) | A language server for circuit files, for editors. Conn3x only. |
+| [`mcp`](/reference/cli/mcp) | A read-only Model Context Protocol server for assistants. Conn3x only. |
 | [`show`](/reference/cli/show) | Show the state or a saved plan. |
 | [`state`](/reference/cli/state) | List, inspect, move and remove items in state. |
 | [`output`](/reference/cli/output) | Print output values. |
@@ -60,8 +65,8 @@ The other OpenTofu commands are there too and behave as OpenTofu documents them:
 - `init` warns when state isn't encrypted. See [init](/reference/cli/init).
 - `plan`, `apply`, `destroy`, `refresh` and `drift` connect to your hosts over SSH to read host steps. See [plan](/reference/cli/plan).
 - `fmt` formats `.circuit.hcl` files too. See [fmt](/reference/cli/fmt).
-- Host steps can't be imported with `conn3x import` or `import` blocks.
-- `version` prints the Conn3x version and the OpenTofu release it's built on. With `-json`, it adds `conn3x_version` to OpenTofu's fields.
+- To adopt what a host already has, put `import` on the step. See [Adopt servers you already run](/guides/adopt-servers). `conn3x import` and hand-written `import` blocks take the same JSON import ID, described under [a step inside a module](/reference/circuits/steps#a-step-inside-a-module).
+- `version` prints the Conn3x version and the OpenTofu release it's built on. With `-json`, it adds `conn3x_version` and `agent` to OpenTofu's fields. See [version](/reference/cli/version).
 - In `-json` output, the version message that starts the stream names the Conn3x release, and carries a `conn3x` field beside the `tofu` one.
 
 ## Environment variables
@@ -70,8 +75,10 @@ The other OpenTofu commands are there too and behave as OpenTofu documents them:
 
 | Variable | Description |
 | --- | --- |
+| `CONN3X_AGENT` | Whether hosts run commands through the Conn3x agent instead of one SSH session per command: `on`, `off` or `require`, which fails an apply rather than fall back to plain SSH. Defaults to `off`. A connection's own `agent` argument overrides it. The agent is [experimental](/reference/maturity). |
 | `CONN3X_HMAC_KEY` | The key for the HMACs that state keeps instead of write-only file content. It must be at least 32 bytes; `openssl rand -hex 32` makes one. Without it, Conn3x uses `~/.config/conn3x/hmac.key`, and creates that file the first time it writes a write-only secret. Every machine that runs against the same state needs the same key. See [Secrets in files](/concepts#secrets-in-files). |
 | `CONN3X_SSH_MAX_SESSIONS` | The most SSH sessions Conn3x opens at once on one connection to a host. Defaults to `8`, below OpenSSH's default `MaxSessions` of 10. Commands beyond it wait for a free session. If a server allows fewer, Conn3x finds that out on its own and opens fewer, so you only need this to go higher on a server that allows more. Accepts 1 to 1000. |
+| `CONN3X_TRACE` | Write a Go execution trace of the run to this file, to find where a slow plan or apply waits. Open it with `go tool trace FILE`. New in v0.15.0. |
 | `XDG_CONFIG_HOME` | When set, the key file is `$XDG_CONFIG_HOME/conn3x/hmac.key` instead. |
 | `SSH_AUTH_SOCK` | The SSH agent Conn3x logs in with when an `ssh` block has no `private_key_file`. |
 

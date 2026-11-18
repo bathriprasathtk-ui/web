@@ -46,7 +46,7 @@ SQLite is fine for a person or a small team. For more, point Forgejo at PostgreS
 
 ```hcl
 module "postgres" {
-  source = "github.com/conn3xorg/circuit-postgres?ref=v0.2.1"
+  source = "github.com/conn3xorg/circuit-postgres?ref=v0.3.0"
 
   hosts          = { git1 = "203.0.113.10" }
   users          = ["forgejo"]
@@ -184,4 +184,4 @@ MPL-2.0. See [LICENSE](https://github.com/conn3xorg/circuit-forgejo/blob/v0.1.2/
 
 - Repository: [conn3xorg/circuit-forgejo](https://github.com/conn3xorg/circuit-forgejo). This page covers [v0.1.2](https://github.com/conn3xorg/circuit-forgejo/tree/v0.1.2); the repository's [tags](https://github.com/conn3xorg/circuit-forgejo/tags) list every release.
 - Examples: [examples/local](https://github.com/conn3xorg/circuit-forgejo/tree/v0.1.2/examples/local).
-- Related circuits: [Caddy](/circuits/caddy), [PostgreSQL](/circuits/postgres), [Firewall](/circuits/firewall), [Proxmox VE](/circuits/proxmox), [GitLab CE](/circuits/gitlab), [Cockpit](/circuits/cockpit), [n8n](/circuits/n8n), [Fleet](/circuits/fleet).
+- Related circuits: [Caddy](/circuits/caddy), [PostgreSQL](/circuits/postgres), [Firewall](/circuits/firewall), [Conn3x web UI](/circuits/conn3x-ui), [Proxmox VE](/circuits/proxmox), [GitLab CE](/circuits/gitlab), [Cockpit](/circuits/cockpit), [n8n](/circuits/n8n), [Fleet](/circuits/fleet), [Homepage](/circuits/homepage), [Home Assistant](/circuits/homeassistant), [Kestra](/circuits/kestra), [Lempa homelab](/circuits/lempa-homelab), [Mini homelab](/circuits/mini-homelab).

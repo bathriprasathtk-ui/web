@@ -78,6 +78,47 @@ export function parseWorkflow(text) {
 
 const APPLY = /\bconn3x\s+apply\b/;
 const CLEAN_PLAN = /\bconn3x\s+plan\b[^|;&\n]*-detailed-exitcode\b(?!.*\|\|\s*true)/;
+const CONN3X_TEST = /\bconn3x\s+test\b(?!.*\|\|\s*true)/;
+
+// The bodies of the run blocks in a test file, braces matched outside
+// strings.
+function runBlocks(text) {
+  const out = [];
+  for (const m of text.matchAll(/(^|\n)\s*run\s+"[^"\n]*"\s*\{/g)) {
+    let depth = 0, quoted = false;
+    for (let i = m.index + m[0].length - 1; i < text.length; i++) {
+      const c = text[i];
+      if (quoted) {
+        if (c === "\\") i++;
+        else if (c === '"') quoted = false;
+      } else if (c === '"') quoted = true;
+      else if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) {
+        out.push(text.slice(m.index + m[0].length, i));
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// What the circuit's test files do: whether a run applies (apply is the
+// default command), and whether one that applies sets idempotent = true,
+// which plans again and fails on any change.
+function testRuns(files) {
+  let applies = false, idempotent = false;
+  for (const [path, text] of files) {
+    if (!/\.(tftest|tofutest)\.hcl$/.test(path)) continue;
+    for (const body of runBlocks(text)) {
+      if (/^\s*command\s*=\s*plan\b/m.test(body)) continue;
+      applies = true;
+      idempotent ||= /^\s*idempotent\s*=\s*true\b/m.test(body);
+    }
+  }
+  return { applies, idempotent };
+}
+
+const runsTest = (j) => j.steps.some((s) => s.lines.some((l) => CONN3X_TEST.test(l)));
 
 // Every line a job runs after its first apply, with the scripts it calls
 // pasted in. Steps that only run on failure or to clean up don't count.
@@ -239,7 +280,16 @@ const fail = (detail) => ({ state: "fail", fraction: 0, detail });
 const na = (detail) => ({ state: "na", detail });
 const date = (ms) => new Date(ms).toISOString().slice(0, 10);
 
-const code = (ev, ...exts) => [...ev.files].filter(([p]) => exts.some((x) => p.endsWith(x)) && !p.startsWith("examples/") && !p.startsWith("test/")).map(([, t]) => t.split("\n").filter((l) => !/^\s*(#|\/\/)/.test(l)).join("\n")).join("\n");
+// conn3x lint's inline ignore, with a reason, covers its own line and the one below.
+const IGNORE = /(?:#|\/\/)\s*conn3x-lint:ignore\s+(C3X\d{3})\s+\S/;
+const ignored = (id) => (l) => (IGNORE.exec(l ?? "") ?? [])[1] === id;
+// A rule ID such as "C3X003" among the extensions drops the lines its ignores cover.
+const code = (ev, ...args) => {
+  const id = args.find((a) => a.startsWith("C3X"));
+  const exts = args.filter((a) => !a.startsWith("C3X"));
+  return [...ev.files].filter(([p]) => exts.some((x) => p.endsWith(x)) && !p.startsWith("examples/") && !p.startsWith("test/"))
+    .map(([, t]) => t.split("\n").filter((l, i, all) => !(id && (ignored(id)(l) || ignored(id)(all[i - 1])))).filter((l) => !/^\s*(#|\/\/)/.test(l)).join("\n")).join("\n");
+};
 
 // Code without its prose: an example address in an error message isn't a listener.
 const logic = (ev, ...exts) => code(ev, ...exts).split("\n").filter((l) => !/^\s*(description|error_message)\s*=/.test(l)).join("\n");
@@ -258,6 +308,8 @@ const PRIVILEGED = [
 // curl with -k or --insecure, and a credential on the same command. -K is how
 // the circuits pass one on stdin. Lower-case -k is matched on its own, so -K isn't it.
 const INSECURE_CREDENTIAL = /\bcurl\b(?=[^|;&\n]*\s(?:-[a-zA-Z]*k[a-zA-Z]*|--insecure)(?=\s))(?=[^|;&\n]*\s(?:-[a-zA-Z]*K|--config\b|-u\s|--user\b|-H\s*["']?(?:Authorization|X-[A-Za-z-]*(?:Token|Key))|--cert\b|--cookie\b|--oauth2-bearer\b))/;
+// What a circuit that configures hosts has: the host data source, a circuit block, or a module (another circuit).
+const HOST_CODE = /\bconn3x_host\b|^\s*(?:circuit|module)\s+"/m;
 // The port check from the share-a-circuit guide.
 const PORT_CHECK = /\/proc\/net\/tcp/;
 
@@ -299,6 +351,8 @@ export const RUBRIC = [
     id: "matrix", group: "Testing", points: 10,
     title: "Applied on real distributions in CI",
     test: (ev) => {
+      // A circuit that only drives a device through a provider has no Linux host to vary.
+      if (!HOST_CODE.test(code(ev, ".hcl", ".tf"))) return na("Configures no host: no conn3x_host, circuit or module block, only provider resources.");
       const ids = new Set();
       for (const job of ev.applyJobs) for (const l of job.head) for (const m of l.matchAll(/\b(rocky\d+|fedora\d+|ubuntu\d{4}|debian\d+|windows-?20(?:22|25))\b/g)) ids.add(m[1].replace("-", ""));
       if (ev.applyJobs.length && !ids.size) ids.add("one host");
@@ -318,7 +372,9 @@ export const RUBRIC = [
         const at = s.lines.findIndex((l) => APPLY.test(l));
         return at >= 0 && s.lines.slice(at).some((l) => CLEAN_PLAN.test(l));
       }));
-      return hit ? pass("CI fails if a plan after apply shows changes.") : fail("CI doesn't run plan -detailed-exitcode after an apply.");
+      if (hit) return pass("CI fails if a plan after apply shows changes.");
+      if (ev.tests.idempotent && ev.applyJobs.some(runsTest)) return pass("CI runs conn3x test, and a run that applies sets idempotent = true.");
+      return fail("CI doesn't run plan -detailed-exitcode after an apply, or conn3x test with idempotent = true.");
     },
   },
   {
@@ -385,7 +441,7 @@ export const RUBRIC = [
     title: "Container images pinned by digest",
     test: (ev) => {
       // An output naming the version isn't a pull.
-      const hcl = logic(ev, ".hcl", ".tf").split("\n").filter((l) => !/^\s*value\s*=/.test(l)).join("\n");
+      const hcl = logic(ev, ".hcl", ".tf", "C3X002").split("\n").filter((l) => !/^\s*value\s*=/.test(l)).join("\n");
       const images = hcl.match(/"(?:docker\.io|ghcr\.io|quay\.io|registry\.[\w.-]+|mcr\.microsoft\.com)\/[^"\s]+"/g) ?? [];
       const loose = images.filter((i) => !i.includes("@") && /:[^/]+"$/.test(i));
       if (!images.length) return na("Pulls no images.");
@@ -414,7 +470,7 @@ export const RUBRIC = [
     title: "Default listen address",
     test: (ev) => {
       // A lookup or comparison handles the address when a caller picks it; it doesn't listen on it.
-      const lines = logic(ev, ".hcl", ".tf").split("\n").filter((l) => !/\b(lookup|contains|setintersection|replace|coalesce)\(|[!=]=\s*"/.test(l));
+      const lines = logic(ev, ".hcl", ".tf", "C3X003").split("\n").filter((l) => !/\b(lookup|contains|setintersection|replace|coalesce)\(|[!=]=\s*"/.test(l));
       const hit = lines.find((l) => /\bdefault\s*=\s*\[?\s*"(::|\[::\]|\*)(:\d+)?"|0\.0\.0\.0(?![/\d])|--[\w.-]*(listen|bind|addr)[\w-]*=:/.test(l));
       return hit ? fail(`Listens on every address by default: ${hit.trim().slice(0, 80)}`) : pass("Found no default or literal that listens on every address.");
     },
@@ -423,7 +479,7 @@ export const RUBRIC = [
     id: "privileged-shell", group: "Supply chain", points: 5,
     title: "Privileged shell patterns",
     test: (ev) => {
-      const text = logic(ev, ".hcl", ".tf", ".sh");
+      const text = logic(ev, ".hcl", ".tf", ".sh", "C3X004");
       const found = PRIVILEGED.filter(([re]) => re.test(text)).map(([, what]) => what);
       if (INSECURE_CREDENTIAL.test(text)) {
         found.push(`sends a credential with the certificate check off, ${PORT_CHECK.test(text) ? "after checking who holds the port, which narrows the risk without closing it" : "without checking who holds the port"}`);
@@ -471,8 +527,10 @@ export function gradeOf(checks) {
 /** Grades one circuit from what was read. `held` says which results to leave out. */
 export function evaluate(ev, { held = HELD, extra = [] } = {}) {
   const jobs = parseWorkflow(ev.files.get(".github/workflows/ci.yml") ?? "");
-  const applyJobs = jobs.filter((j) => j.steps.some((s) => s.lines.some((l) => APPLY.test(l))));
-  const full = { ...ev, applyJobs, after: (j) => afterApply(j, ev.files) };
+  const tests = testRuns(ev.files);
+  // A job that runs conn3x test applies when one of the test runs does.
+  const applyJobs = jobs.filter((j) => j.steps.some((s) => s.lines.some((l) => APPLY.test(l))) || (tests.applies && runsTest(j)));
+  const full = { ...ev, applyJobs, tests, after: (j) => afterApply(j, ev.files) };
   const checks = [...RUBRIC, ...extra].map((r) => {
     const base = { id: r.id, max: r.points, ...(r.gate && { gate: true }) };
     if (held.has(r.id)) return { ...base, state: "held", points: 0 };
@@ -527,6 +585,7 @@ export function latestTag(names) {
 async function read(repo) {
   const tags = await get(`/repos/${repo}/tags?per_page=100`);
   const tag = latestTag(tags.map((t) => t.name));
+  const versions = tags.map((t) => t.name).filter((t) => /^v\d+\.\d+\.\d+$/.test(t)).map((t) => t.slice(1));
   if (!tag) throw new Error(`${repo} has no release tag`);
   const files = tarFiles(await get(`/repos/${repo}/tarball/${tag}`, { raw: true }));
   const ref = await get(`/repos/${repo}/git/ref/tags/${tag}`);
@@ -542,7 +601,7 @@ async function read(repo) {
     if (hosts?.workflow_runs?.[0]) realHost = { date: hosts.workflow_runs[0].updated_at };
   }
   return {
-    tag, files,
+    tag, versions, files,
     tagVerified: Boolean(signed.verification?.verified),
     tagDate: signed.tagger?.date ?? signed.committer?.date,
     run: run && { conclusion: run.conclusion, date: run.updated_at, url: run.html_url, attempt: run.run_attempt, previous: previous?.conclusion },
@@ -574,6 +633,7 @@ async function pool(items, size, fn) {
 /** One circuit's published entry. */
 export const entry = (c, ev, opts) => ({
   name: c.name, repo: c.repo, tag: ev.tag, checkedAt: new Date(ev.now).toISOString(),
+  ...(ev.versions?.length && { versions: ev.versions }),
   ...(ev.run?.url && { ciRun: ev.run.url }),
   ...evaluate(ev, opts),
 });

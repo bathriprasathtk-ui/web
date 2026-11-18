@@ -3,9 +3,9 @@ title: Circuit language
 description: What a circuit is, which files circuits go in, and how Conn3x turns each step into a resource with one instance per host.
 ---
 
-Conn3x configuration is OpenTofu configuration with one more block type, `circuit`. A circuit configures a group of Linux hosts over SSH: it names the hosts, says how to log in to them, and lists the steps to apply to each one, in order.
+Conn3x configuration is OpenTofu configuration with one more block type, `circuit`. A circuit configures a group of hosts over SSH, Linux or, [in preview](/reference/maturity), Windows Server: it names the hosts, says how to log in to them, and lists the steps to apply to each one, in order.
 
-This section documents the circuit language in Conn3x v0.6.3. Everything else in a configuration, such as variables, resources, modules, outputs and state, works as the [OpenTofu language documentation](https://opentofu.org/docs/language/) describes.
+This section documents the circuit language in Conn3x v0.10.0. Everything else in a configuration, such as variables, resources, modules, outputs and state, works as the [OpenTofu language documentation](https://opentofu.org/docs/language/) describes.
 
 ```hcl
 circuit "web" {
@@ -54,7 +54,10 @@ circuit "web" {
 
 ```text
 circuit "NAME" {
-  hosts = EXPRESSION
+  hosts        = EXPRESSION
+  strategy     = "lockstep" | "per_host" # optional
+  batch_size   = NUMBER | "PERCENT%"     # optional, with per_host
+  max_failures = NUMBER | "PERCENT%"     # optional, with batch_size
 
   ssh {
     ARGUMENT = EXPRESSION
@@ -81,6 +84,9 @@ A circuit block takes one label, the circuit's name, and these arguments and blo
 | Name | Required | Description |
 | --- | --- | --- |
 | `hosts` | Yes | The hosts to configure. A map of host names to addresses or host objects, or a set of addresses. See [Hosts](/reference/circuits/hosts). |
+| `strategy` | No | `"lockstep"`, the default: each step waits for the step before it on every host. `"per_host"`: each host runs its own chain of steps. Since v0.9.0. See [Per host](/reference/circuits/steps#per-host). |
+| `batch_size` | No | Apply the circuit to this many hosts at a time, such as `2`, or this percentage of the hosts that change, such as `"20%"`. Needs `strategy = "per_host"`, and has to be a constant. New in v0.15.0. See [Batches](/reference/cli/apply#batches). |
+| `max_failures` | No | With `batch_size`, how many hosts may fail before no more batches start: a number, such as `2`, or a percentage of the hosts that change, rounded down, such as `"20%"`. A constant. Defaults to `0`: the first failure stops the rollout. New in v0.15.0; percentages since v0.16.0. |
 | `ssh` | Yes | Exactly one block. How to log in to every host. See [The ssh block](/reference/circuits/ssh). |
 | `step` | No | Any number of blocks. Each holds one module and runs on every host, in the order written. See [Steps](/reference/circuits/steps). |
 | `handler` | No | Any number of blocks. Each restarts or reloads a service on the hosts where a step that notifies it changed something. See [Handlers](/reference/circuits/handlers). |
@@ -139,16 +145,20 @@ Because steps are resources, everything that works with resources works with the
 `conn3x validate` and `conn3x plan` warn about two things in a circuit:
 
 - A handler that no step notifies. It never runs, and Conn3x creates no resource for it.
-- A file that one step writes whole, with `file` or `template`, while another step in the same circuit edits it with `line` or `block`. Each apply would undo the other. Put the edit in the file's content instead. Conn3x can only compare paths written as literal strings.
+- A file that one step writes whole, with `file` or `template`, while another step in the same circuit edits part of it with `line`, `block`, `ini`, `replace` or `limit`. Each apply would undo the other. Put the edit in the file's content instead. Conn3x can only compare paths written as literal strings.
 
 ## In this section
 
 - [Hosts](/reference/circuits/hosts): the `hosts` argument, host objects and instance keys.
 - [The ssh block](/reference/circuits/ssh): every connection setting, jump hosts, host keys and sudo.
-- [Steps](/reference/circuits/steps): ordering, dependencies and `for_each`.
+- [Steps](/reference/circuits/steps): ordering, dependencies, `for_each` and `lifecycle`.
 - [Handlers](/reference/circuits/handlers): `notify`, when handlers run, and the `revision` attribute.
+- [Rescues, always and prereq](/reference/circuits/rescues): what runs on a host after a step fails, after it runs at all, or before it changes.
 - [Removal](/reference/circuits/removal): what `on_remove` does for each module.
 - [Secrets](/reference/circuits/secrets): write-only content and ephemeral variables.
 - [Resource addresses](/reference/circuits/addresses): targeting steps and hosts, and using the state commands.
 - [Expressions and functions](/reference/circuits/expressions): what circuits inherit from OpenTofu.
 - [Host facts](/reference/host-facts): reading a host's operating system and hardware at plan time.
+- [Installed packages and services](/reference/host-packages-and-services): reading what a host has installed and running, at plan time.
+
+To check a circuit with `conn3x test`, see the [Test a circuit](/guides/test-a-circuit) guide.

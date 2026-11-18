@@ -1,0 +1,310 @@
+---
+title: Network devices
+description: "How Conn3x configures switches and routers over their own CLI: Arista EOS since v0.9.0, Juniper Junos since v0.17.0 and VyOS since v0.18.0, all experimental."
+---
+
+:::note
+The `eos_*` modules are in Conn3x since v0.9.0, and all of them are experimental. `eos_interface`, `eos_user` and one commit per switch are new in v0.10.0. The `junos_*` modules are new in v0.17.0, and the `vyos_*` modules in v0.18.0, experimental too. Earlier releases don't know the modules they lack, so a circuit that uses one fails `conn3x validate`.
+:::
+
+A switch is a host like any other in a circuit. You list it in `hosts`, reach it through the circuit's `ssh` block, and the step's module decides how Conn3x talks to it. A `package` step runs shell commands. An `eos_*`, `junos_*` or `vyos_*` step types into the device's own CLI. There's no shell, no `sudo` and no agent on the switch, and nothing to install there.
+
+```hcl
+circuit "leafs" {
+  hosts = { leaf1 = "10.0.0.11", leaf2 = "10.0.0.12" }
+
+  ssh {
+    user             = "ops"
+    private_key_file = "~/.ssh/id_ed25519"
+  }
+
+  step "name" {
+    eos_hostname {
+      name = each.key
+    }
+  }
+
+  step "vlans" {
+    for_each = { users = 10, voice = 20 }
+    eos_vlan {
+      vlan_id = item.value
+      name    = item.key
+    }
+  }
+
+  step "uplink" {
+    eos_config {
+      parents = ["interface Ethernet1"]
+      lines   = ["description uplink to core", "switchport mode trunk"]
+    }
+  }
+}
+```
+
+Keep switches in their own circuit. An `ssh` block that suits a Linux server, with `become` for example, is refused on an `eos_*`, `junos_*` or `vyos_*` step, and `confirm_after` (below) is refused on everything else.
+
+## What works today
+
+Arista EOS, since v0.17.0 Juniper Junos, and since v0.18.0 VyOS; [Junos](#juniper-junos) and [VyOS](#vyos) have their own sections below. For EOS:
+
+| Module | What it owns |
+| --- | --- |
+| [`eos_config`](/modules/eos_config) | Lines under a parent block, written the way `show running-config` prints them. Other lines are left alone, or with `match = "block"` the block must be exactly these lines. |
+| [`eos_hostname`](/modules/eos_hostname) | The switch's hostname. |
+| [`eos_interface`](/modules/eos_interface) | One interface's description, up or down, access or trunk, VLANs and MTU. Every other line under the interface is left alone. Since v0.10.0. |
+| [`eos_user`](/modules/eos_user) | A local account: role, privilege, SSH key, and a password that stays out of state. Since v0.10.0. |
+| [`eos_vlan`](/modules/eos_vlan) | A VLAN and its name. Removing the step deletes the VLAN. |
+| [`conn3x_eos_device`](/reference/eos-device) | A data source: model, EOS version, serial and system MAC, for preconditions. |
+
+Plan, `in_sync` and [`conn3x drift`](/guides/drift) work as they do for servers: Conn3x reads `show running-config` and compares only the lines a step owns. Lines no step names aren't drift.
+
+All of it is [experimental](/reference/maturity). It's tested against cEOS-lab 4.37.0F, Arista's container image, on a local machine. It isn't tested in CI, because the image can't be shared there yet, and it isn't tested on hardware.
+
+## The login
+
+The switch has to start an SSH login in privileged mode. Give the user privilege 15 and a key, and tell EOS to honour that privilege at login:
+
+```
+username ops privilege 15 role network-admin
+username ops ssh-key ssh-ed25519 AAAA...
+aaa authorization exec default local
+```
+
+Without the `aaa` line, EOS starts every SSH login unprivileged, even for a privilege 15 user, and every step fails with a message that names the fix.
+
+If your site keeps `enable` behind a password and won't give a tool's login privilege 15, use `become` instead (since v0.21.0). On a switch it means `enable`, as Ansible's `become_method: enable` does:
+
+```hcl
+ssh {
+  user                 = "ops"
+  private_key_file     = "~/.ssh/id_ed25519"
+  become               = true
+  become_password_file = "~/.eos-enable"
+}
+```
+
+Every command then goes to the CLI after `enable` and the password from the file, which is read at run time and never goes into configuration, state or logs. Leave out `become_password_file` when the switch has no enable password. With a wrong password the switch takes the lines after it as more tries, so nothing runs, and the step fails with "the switch refused the enable password from become_password_file". `become` works on Arista EOS only; Junos, VyOS and IOS XE still need a login that starts privileged.
+
+Password logins aren't supported yet. Use a key, or the SSH agent.
+
+## How a change is made
+
+Every change goes through a named EOS config session, so it's all or nothing:
+
+1. The lines go into a session, which isn't live yet. If the switch refuses any of them, the session is aborted and nothing changes.
+2. The session is committed with a five-minute revert timer.
+3. Conn3x waits `confirm_after`, 30 seconds by default.
+4. It logs in again, over a new SSH connection, and confirms the commit.
+5. The running config is saved to startup-config.
+
+If the change cut Conn3x off, the new login fails, the confirm never arrives, and the switch rolls the change back by itself when the timer runs out. Your next apply finds the lines missing and tries again.
+
+## Why it waits before confirming
+
+A change doesn't take effect the instant it's committed. On cEOS-lab, turning off SSH stopped new logins 3 to 6 seconds after the commit. A confirm sent straight away gets in before that, so Conn3x would keep the very change that's about to lock it out. The wait is there so the change has bitten by the time Conn3x tests the login.
+
+The wait has a cost, so Conn3x pays it once per switch, not once per step; see below.
+
+Thirty seconds is a measured guess, not a guarantee. ACLs, VRF moves, AAA changes and real switch hardware can take longer to settle. Raise the wait in the circuit's `ssh` block when your changes need it:
+
+```
+ssh {
+  user          = "ops"
+  confirm_after = "90s"
+}
+```
+
+It takes at least `"5s"` and anything under `"4m"`, so the confirm always lands before the five-minute revert.
+
+## One commit per switch
+
+Ten changed steps shouldn't mean ten waits, and since v0.10.0 they don't. In v0.9.0 each step was its own session, so ten changed steps cost about five minutes of waiting. Now the steps for a switch share one config session per apply:
+
+1. Each `eos_*` step adds its lines to the switch's session. Nothing is live yet. A step with nothing to change doesn't open one.
+2. Once every step for that switch is in, one commit with the revert timer makes the lot live together.
+3. One `confirm_after` wait, one confirm over a new login, one save.
+
+On cEOS-lab, a ten-step circuit with `confirm_after = "10s"` applied in 13.5 seconds. One session per step took 97.
+
+The plan shows one extra line per switch, `conn3x_eos_commit.<circuit>__commit`, and it only changes when one of the circuit's `eos_*` steps does. It's never drift: a hand edit shows up on the step that owns the line. With `strategy = "per_host"`, each switch commits as soon as its own steps are in, without waiting for the others.
+
+Sharing a session changes a few things:
+
+- **A failed step drops the whole session.** The steps before it on that switch were only staged, so nothing on the switch changes. The next apply makes them again.
+- **A rollback takes the whole batch.** If one step's change locks Conn3x out, the confirm never comes, and the switch rolls back every step of that apply, not just the bad one. Fix the bad step and apply again.
+- **A hand edit mid-apply stops the commit.** EOS commits a session by swapping running-config for the session's copy, which would quietly undo an edit made since the session started. If running-config changed while the apply was adding lines, Conn3x aborts the session instead. Nothing changes; apply again.
+- **A leftover session gets cleaned up.** An apply that's killed before its commit leaves a pending `conn3x-` session, which was never live. The next apply aborts it before it opens its own. One killed during the wait leaves a commit on its revert timer, and the next apply won't change that switch until it has rolled back.
+- **Target the commit, not a step.** `-target` on a single `eos_*` step leaves the commit out, so its lines are dropped when the run ends. Target `conn3x_eos_commit.<circuit>__commit` instead; it brings the circuit's steps with it.
+- **Destroying a circuit commits once too.** Its steps' removals go into one session per switch, and `conn3x_eos_removals.<circuit>__removals` commits them together. Seven VLAN steps came off in 13.2 seconds instead of about 70.
+- **A step you delete from a circuit that stays** commits its removal in the run's session when one is open, and in a session of its own when nothing else on that switch changes.
+- **Removals aren't lost with a failed session.** If a session that holds removals fails, such as when another run took the switch, Conn3x has already forgotten those steps, so it commits the removals on their own. If that fails too, the error lists the lines to remove by hand.
+
+## A copy before every change
+
+Since v0.20.0, a circuit's `device_backup_dir` keeps the configuration each device had before a change, the copy most teams take by hand, or with Oxidized or RANCID, before touching a switch:
+
+```hcl
+circuit "core" {
+  hosts             = var.switches
+  device_backup_dir = "${path.module}/backups"
+  ...
+}
+```
+
+Before a commit that changes a device, Conn3x writes that device's configuration as it was to `backups/HOST-20261114T103000Z.cfg` on the machine running Conn3x. For Junos and VyOS it's the configuration the circuit's first step read, which is what the commit changes from. For EOS it's `show running-config`, read just before the session commits. An apply that changes nothing on a device writes nothing, and no backup overwrites another. Files are readable by their owner only, in a directory only its owner can open, since a configuration can hold hashed secrets. If a backup can't be written, the commit stops before it sends anything.
+
+## Guards on your own login
+
+Two modules could cut Conn3x off from the switch it's changing, so both refuse to:
+
+- `eos_interface` won't shut down the interface that holds the address Conn3x reaches the switch at. The revert timer would undo it, but only after the full wait.
+- `eos_user` won't demote or delete the account Conn3x logs in as.
+
+Passwords and their hashes are masked in session diffs and errors, so a log never holds one.
+
+### Secrets in config steps
+
+A TACACS key or a BGP password in `lines` would end up in state, written as you typed it. Put those lines in `lines_wo` instead, which is write-only:
+
+```hcl
+step "aaa" {
+  eos_config {
+    lines    = ["tacacs-server host 10.0.0.5"]
+    lines_wo = ["tacacs-server key use-an-ephemeral-variable-here"]
+  }
+}
+```
+
+State keeps an HMAC of the lines and where each one starts up to its secret, such as `tacacs-server key`. The switch prints most secrets hashed, so a refresh checks only that a line with that start is there. A changed secret changes the HMAC, and the next apply sends the lines again. SNMP communities are refused, because a community's name is its secret; use an SNMPv3 user. The [eos_config reference](/modules/eos_config#secrets-in-lines_wo) has the details.
+
+`junos_config` and `vyos_config` take `lines_wo` too, since v0.20.0. There a secret is the statement's last word, after a keyword ending in `password`, `secret` or `key`, such as `set protocols bgp 65000 neighbor 192.0.2.1 password 'MyPassword'`. State keeps the statement without that word. Plain-text passwords and SNMP communities are refused, as on EOS. Rotation hasn't been tried on a real switch yet, so if your switch refuses it, tell us on [#859](https://github.com/conn3xorg/conn3x/issues/859).
+
+## Juniper Junos
+
+New in v0.17.0, and experimental like the EOS modules. Conn3x talks to Junos the way it talks to EOS, over SSH and the device's own CLI, with no NETCONF to turn on and nothing to install.
+
+| Module | What it owns |
+| --- | --- |
+| [`junos_config`](/modules/junos_config) | Set statements, written the way `show configuration \| display set` prints them. Other statements are left alone, or with `match = "block"` the statements under a `prefix` must be exactly these. |
+| [`junos_hostname`](/modules/junos_hostname) | The device's host name. |
+| [`junos_interface`](/modules/junos_interface) | One interface's description, enabled or disabled, MTU, and on a switch port, access or trunk and its VLAN members. |
+| [`junos_user`](/modules/junos_user) | A local account: login class, SSH keys, and a password that stays out of state. |
+| [`junos_vlan`](/modules/junos_vlan) | A VLAN by name and its ID. Removing the step deletes the VLAN. |
+
+A `conn3x_junos_device` data source reads the host name, model and Junos version, for preconditions.
+
+It's tested against vJunos-switch 26.2R1.7 on a lab VM, not yet in CI and not on hardware.
+
+### The login
+
+Log in as a user of class `super-user`, whose login starts in the CLI:
+
+```
+set system login user ops class super-user
+set system login user ops authentication ssh-ed25519 "ssh-ed25519 AAAA..."
+```
+
+`root` is refused, because its login starts in a shell.
+
+### How a change goes in
+
+Junos answers every command with exit status 0, even one it refused, and a script typed into its CLI can't stop halfway: after a refused line, a `commit` still commits everything else. So Conn3x reads every answer for the device's own errors, and sends each change twice.
+
+1. **A dry run** in `configure private`: the lines, `commit check`, then `rollback` and `exit`. If the device refuses anything, Conn3x stops with the device's own words, and nothing has changed.
+2. **The commit** in `configure exclusive`, with `commit confirmed 5`. Junos refuses `commit confirmed` in private mode, which is why there are two passes. If someone else holds the configuration lock, Conn3x stops, and nothing has changed.
+3. **The confirm.** After `confirm_after`, Conn3x logs in again over a new connection and runs `commit check`, which confirms. If that login can't get in, Junos rolls the change back by itself within five minutes.
+
+Commits on Junos persist, so there's no save step.
+
+While a commit confirmed waits for its confirm, Junos says so every time you enter configuration mode, and Conn3x listens. A refresh counts the device's steps as out of sync, since their lines may yet roll back, and an apply stops before it sends anything. A session that ends mid-commit never reads as "nothing changed" either: the commit may be what cut it.
+
+### One commit per device
+
+As on EOS, a device's steps in a circuit share one commit per apply. Junos keeps nothing between logins, so the lines wait in Conn3x until the circuit's last step is in. Each step still runs the dry run over everything staged so far, so a refused line fails the step that brought it. On vJunos, a seven-step circuit and its destroy each made exactly one commit.
+
+The plan shows `conn3x_junos_commit.<circuit>__commit` and `conn3x_junos_removals.<circuit>__removals`, which work like their EOS twins above.
+
+### Guards
+
+- `junos_interface` won't disable a management interface (`fxp0`, `em0`, `me0`, `vme`), or the interface that holds the address Conn3x connects to.
+- `junos_user` won't demote or delete the account Conn3x logs in as.
+- `junos_config` takes nothing but `set` statements, so no line can leave configuration mode, commit early or run another command.
+
+## VyOS
+
+New in v0.18.0, and experimental. VyOS is a common router in homelabs and small sites, and Conn3x talks to it over SSH with nothing to install, through VyOS's own scripting.
+
+| Module | What it owns |
+| --- | --- |
+| [`vyos_config`](/modules/vyos_config) | Set statements, written the way `show configuration commands` prints them, with quotes compared loosely: `'uplink'`, `"uplink"` and `uplink` are the same value. Other statements are left alone, or with `match = "block"` the statements under a `prefix` must be exactly these. |
+| [`vyos_hostname`](/modules/vyos_hostname) | The router's host name. |
+| [`vyos_interface`](/modules/vyos_interface) | One interface's description, its whole list of addresses, enabled or disabled, and its MTU. |
+
+A `conn3x_vyos_device` data source reads the host name and VyOS version, for preconditions.
+
+It's tested against VyOS 2026.11.13-0016-rolling in a container on a lab VM, not yet in CI and not on hardware.
+
+### The login
+
+Log in as a user in the `vyattacfg` group, such as VyOS's own `vyos` user, with a key. `become` and `agent` are refused.
+
+### How a change goes in
+
+VyOS has Junos's trap: a script typed into its configuration mode carries on past a refused line, and a later `commit` still commits everything else. So Conn3x reads every answer, and sends each change twice.
+
+1. **A dry run:** the lines, `compare`, then `exit discard`. If the router answers `Set failed` or `is not valid`, Conn3x stops with its words, and nothing has changed.
+2. **The commit**, with `commit-confirm 5`. VyOS asks "Proceed ? [Y/n]" first, and Conn3x answers it. Left unanswered in a script, it waits forever.
+3. **The confirm.** After `confirm_after`, Conn3x logs in again over a new connection, runs `confirm` and saves. A change that locks Conn3x out never gets confirmed, so VyOS rolls it back by itself within five minutes. VyOS keeps nothing across a reboot that isn't saved, which is why the save comes last.
+
+While a commit-confirm waits for its confirm, VyOS runs a timer for it, and Conn3x asks about that timer. A refresh then counts the router's steps as out of sync, and an apply stops before it sends anything.
+
+### Reload, not reboot
+
+VyOS's default way to undo an unconfirmed commit is to **reboot** the router. That gets rid of a change that locked you out, but it takes everything behind the router down with it. Have it reload the previous configuration instead:
+
+```
+set system config-management commit-confirm action reload
+```
+
+Until the router says `reload`, every refresh of a `vyos_*` step warns.
+
+### One commit per router
+
+As with Junos and EOS, a router's steps in a circuit share one commit per apply, through `conn3x_vyos_commit.<circuit>__commit` and `conn3x_vyos_removals.<circuit>__removals`. On the lab router, three steps and their destroy each made exactly one commit.
+
+### Guards
+
+- `vyos_interface` won't take off the address Conn3x connects to, or disable the interface that holds it.
+- `vyos_config` takes nothing but `set` statements.
+
+## Cisco IOS XE
+
+New in v0.20.0, and experimental. [`ios_config`](/modules/ios_config) owns lines of an IOS XE device's running configuration, under the blocks they sit in, the way `eos_config` does on Arista. It's tested against IOS XE 17.18 (IOL-XE) and classic IOS 15.9 (IOSv) in Cisco Modeling Labs on a lab VM, not yet in CI and not on hardware.
+
+### The login
+
+Log in as a user with privilege 15, so the session starts at `#`, with an SSH key. `become` and `agent` are refused. IOS XE closes the connection after each command, so Conn3x opens a login per command, one at a time per device, which keeps it well inside `ip ssh maxstartups` and a five-line `line vty 0 4`.
+
+### How a change goes in
+
+IOS has no candidate configuration: each line is live once typed, and a refused line doesn't stop the ones after it. What makes a change safe is the revert timer.
+
+1. **The checks.** The device must have a configuration archive (`archive` with a `path`), which the revert timer rolls back to, and no change already waiting for its confirm. If either is missing, Conn3x stops before it types anything.
+2. **The change**, under `configure terminal revert timer 5`. If IOS answers any line with a `%` message, Conn3x runs `configure revert now` at once, and nothing of the change stays.
+3. **The confirm.** After `confirm_after`, Conn3x logs in again, runs `configure confirm`, and saves with `write memory`. A change that locks Conn3x out never gets confirmed, so IOS rolls it back by itself within five minutes.
+
+### One change per device
+
+In a circuit, a device's `ios_*` steps share one change per apply, as on Junos and VyOS.
+
+Classic IOS, such as IOS 15.9, only offers SHA-1 SSH, which Conn3x refuses by default. Since v0.20.0, `legacy_algorithms = true` on that device's [host object](/reference/circuits/hosts#host-object-fields) lets Conn3x connect. It doesn't apply to your other hosts. `ios_config` works there the same way, revert timer included; the archive `path` is `flash:` on IOSv rather than `unix:`.
+
+Write each line the way `show running-config` prints it, since that's what Conn3x compares against. Classic IOS prints access-list entries without their sequence numbers, so `permit 192.0.2.0 0.0.0.255` matches there and `10 permit 192.0.2.0 0.0.0.255` would show as drift on every plan. IOS XE prints the numbers.
+
+Upgrading changes one thing for a host with a pinned RSA `host_key`. If its sshd only signs with `ssh-rsa`, it connected before by accident, since a pinned RSA key used to ask for the SHA-1 signature. It now fails with `no common algorithm` until the host sets `legacy_algorithms = true`.
+
+## What's coming
+
+- More EOS, Junos, VyOS and IOS XE modules, and `lines_wo` for secrets in `ios_config`. See the [roadmap](/roadmap).
+
+Until then, the provider-backed circuits work today: [RouterOS baseline](/circuits/routeros-baseline), [OPNsense VLANs](/circuits/opnsense-vlans) and [Proxmox VE network](/circuits/proxmox-network).

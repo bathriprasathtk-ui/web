@@ -39,7 +39,7 @@ const evidence = (workflow, more = {}) => ({
   realHost: null,
   now: Date.parse("2026-11-01T00:00:00Z"),
   ...more,
-  files: new Map([[".github/workflows/ci.yml", workflow], ["main.circuit.hcl", 'step "x" {\n  service {}\n}\n'], ...(more.files ?? [])]),
+  files: new Map([[".github/workflows/ci.yml", workflow], ["main.circuit.hcl", 'circuit "x" {\n  step "x" {\n    service {}\n  }\n}\n'], ...(more.files ?? [])]),
 });
 const check = (r, id) => r.checks.find((c) => c.id === id);
 const fetching = "      - name: Fetch\n        run: sudo podman exec host curl -sSf localhost:80\n";
@@ -85,6 +85,21 @@ test("the second plan has to be able to fail", () => {
   assert.equal(check(evaluate(evidence(ci(""))), "second-plan").state, "pass");
 });
 
+test("conn3x test with idempotent = true counts as the second plan", () => {
+  const wf = "jobs:\n  e2e:\n    strategy:\n      matrix:\n        os: [ubuntu2404]\n    steps:\n      - run: conn3x test\n";
+  const runs = (body) => evidence(wf, { files: [["tests/web.tftest.hcl", body]] });
+  const idem = 'run "apply" {\n  idempotent = true\n  assert {\n    condition     = output.x == "{a}"\n    error_message = "}"\n  }\n}\n';
+  assert.equal(check(evaluate(runs(idem)), "second-plan").state, "pass");
+  // A plan-only run can't take idempotent, and a run without it checks nothing.
+  assert.equal(check(evaluate(runs('run "p" {\n  command    = plan\n  idempotent = true\n}\n')), "second-plan").state, "fail");
+  assert.equal(check(evaluate(runs('run "a" {\n  command = apply\n}\n')), "second-plan").state, "fail");
+  // A test step whose failure is ignored proves nothing.
+  const soft = evidence(wf.replace("conn3x test", "conn3x test || true"), { files: [["tests/web.tftest.hcl", idem]] });
+  assert.equal(check(evaluate(soft), "second-plan").state, "fail");
+  // The applying test job counts toward the matrix too.
+  assert.notEqual(check(evaluate(runs(idem)), "matrix").state, "fail");
+});
+
 test("a circuit that never applies fails, and can't pass on points", () => {
   const r = evaluate(evidence("jobs:\n  validate:\n    steps:\n      - run: conn3x validate\n"));
   assert.equal(check(r, "matrix").state, "fail");
@@ -95,6 +110,15 @@ test("a circuit that never applies fails, and can't pass on points", () => {
 test("the matrix earns a quarter per distribution", () => {
   assert.equal(check(evaluate(evidence(ci(fetching))), "matrix").points, 10);
   assert.equal(check(evaluate(evidence(ci(fetching, "[ubuntu2404, debian13]"))), "matrix").points, 5);
+});
+
+test("the matrix doesn't apply to a circuit that configures no host", () => {
+  const device = (files) => evidence(ci(fetching, "[chr]"), { files: [["main.circuit.hcl", ""], ...files] });
+  assert.equal(check(evaluate(device([["main.tf", 'resource "routeros_ip_dns" "this" {}\n']])), "matrix").state, "na");
+  assert.equal(check(evaluate(device([["main.tf", 'data "conn3x_host" "facts" {}\n']])), "matrix").state, "partial");
+  assert.equal(check(evaluate(device([["main.tf", 'module "podman" {\n  source = "x"\n}\n']])), "matrix").state, "partial");
+  // A conn3x_host in the example is the lab, not the circuit.
+  assert.equal(check(evaluate(device([["examples/local/main.tf", 'data "conn3x_host" "lab" {}\n']])), "matrix").state, "na");
 });
 
 test("a Windows circuit's matrix is its two runners", () => {
@@ -310,4 +334,25 @@ test("the rubric page matches the rubric, and says what a grade isn't", () => {
   }
   assert.match(doc, /not a security guarantee/);
   assert.match(doc, new RegExp(`C \\| ${PASS_MARK} to`));
+});
+
+// The same cases conn3x lint is tested with, copied from conn3xorg/conn3x's
+// internal/conn3x/lint/testdata/grader-cases.json (at 775c137). Change the two
+// together: lint and the grader must agree on what a circuit's code fails.
+test("the grader agrees with conn3x lint on the shared cases", () => {
+  const cases = JSON.parse(read("scripts/testdata/lint-grader-cases.json"));
+  assert.ok(cases.length > 20, "the shared cases are there");
+  for (const c of cases) {
+    const file = c.ext === ".sh" ? "setup.sh" : c.ext === ".tf" ? "variables.tf" : "main.circuit.hcl";
+    const state = check(evaluate(evidence(ci(fetching), { files: [[file, `${c.text}\n`]] }), { held: new Set() }), c.check).state;
+    if (c.hit) assert.equal(state, "fail", `${c.rule} should fail: ${c.text}`);
+    else assert.notEqual(state, "fail", `${c.rule} should not fail: ${c.text}`);
+  }
+});
+
+test("an ignore with no reason doesn't lift a grade", () => {
+  // conn3x lint drops the finding but reports the bare ignore as C3X900; the
+  // grader has no C3X900, so it keeps the finding instead.
+  const ev = evidence(ci(fetching), { files: [["variables.tf", '  # conn3x-lint:ignore C3X003\n  default = "0.0.0.0"\n']] });
+  assert.equal(check(evaluate(ev, { held: new Set() }), "listen-address").state, "fail");
 });
